@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>WoodMood Debug</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --border:#282c36; --text:#e8eaf0; --dim:#8a90a2;
+    --green:#2ecc71; --amber:#f5a623; --red:#e5484d; --blue:#4a9eff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px}
+  .wrap{max-width:1000px;margin:0 auto;padding:16px}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin:0 0 10px}
+
+  /* connection bar */
+  .conn-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr auto;gap:8px}
+  @media (max-width:800px){.conn-grid{grid-template-columns:1fr 1fr}}
+  input{background:#0d0f14;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px 10px;font-size:13px;width:100%}
+  input:focus{outline:1px solid var(--blue)}
+  button{cursor:pointer;border:none;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:600}
+  .btn-connect{background:var(--blue);color:#fff}
+  .btn-connect.disconnect{background:#3a3f4b;color:var(--text)}
+
+  .status-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--dim)}
+  .dot{width:9px;height:9px;border-radius:50%;background:#555}
+  .dot.connecting{background:var(--amber);animation:pulse 1s infinite}
+  .dot.connected{background:var(--green)}
+  .dot.error{background:var(--red)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* diag banner */
+  .banner{border-radius:10px;padding:16px;margin-bottom:14px;display:flex;align-items:center;gap:12px;font-weight:600;font-size:15px}
+  .banner.ok{background:rgba(46,204,113,.12);border:1px solid var(--green);color:var(--green)}
+  .banner.warn{background:rgba(245,166,35,.12);border:1px solid var(--amber);color:var(--amber)}
+  .banner.crit{background:rgba(229,72,77,.12);border:1px solid var(--red);color:var(--red)}
+  .banner.none{background:var(--card);border:1px solid var(--border);color:var(--dim);font-weight:400}
+  .banner .code{font-size:11px;opacity:.7;font-weight:400}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px}
+  .kv{background:#0d0f14;border-radius:6px;padding:8px 10px}
+  .kv .k{font-size:11px;color:var(--dim);margin-bottom:2px}
+  .kv .v{font-size:14px;font-weight:600;word-break:break-word}
+  .v.bool-true{color:var(--red)}
+  .v.bool-false{color:var(--green)}
+  .v.na{color:var(--dim);font-weight:400}
+
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:800px){.two-col{grid-template-columns:1fr}}
+
+  .log{background:#0a0c10;border-radius:6px;height:340px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;padding:8px}
+  .log-row{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid #191c22}
+  .log-time{color:var(--dim);flex:0 0 64px}
+  .log-topic{color:var(--blue);flex:0 0 190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .log-payload{color:var(--text);word-break:break-all}
+
+  .empty{color:var(--dim);text-align:center;padding:20px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>WoodMood Debug</h1>
+  <div class="sub">Live MQTT inspector — shows every value the stove publishes so you can see exactly why something isn't running.</div>
+
+  <div class="card">
+    <h2>Connection</h2>
+    <div class="conn-grid">
+      <input id="cfg-broker" placeholder="Broker  e.g. abc123.emqxsl.com"/>
+      <input id="cfg-port"   placeholder="WSS port  e.g. 8084" type="number"/>
+      <input id="cfg-user"   placeholder="Username"/>
+      <input id="cfg-pass"   placeholder="Password" type="password"/>
+      <input id="cfg-serial" placeholder="Device serial  e.g. JJQF9D"/>
+      <button class="btn-connect" id="conn-btn" onclick="toggleConnect()">Connect</button>
+    </div>
+    <div class="status-row">
+      <div class="dot" id="dot"></div>
+      <span id="status-label">Disconnected</span>
+      <span id="msg-count" style="margin-left:auto"></span>
+    </div>
+  </div>
+
+  <div class="banner none" id="diag-banner">
+    <span>Connect to see the current diagnostic status.</span>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <h2>Doors &amp; Insertion</h2>
+      <div class="grid" id="doors-grid"><div class="empty">No data yet</div></div>
+    </div>
+    <div class="card">
+      <h2>Fault</h2>
+      <div class="grid" id="fault-grid"><div class="empty">No data yet</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Temperature &amp; Fans</h2>
+    <div class="grid" id="temp-grid"><div class="empty">No data yet</div></div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <h2>System</h2>
+      <div class="grid" id="system-grid"><div class="empty">No data yet</div></div>
+    </div>
+    <div class="card">
+      <h2>Network &amp; Firmware</h2>
+      <div class="grid" id="net-grid"><div class="empty">No data yet</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Lifetime Stats</h2>
+    <div class="grid" id="stats-grid"><div class="empty">No data yet</div></div>
+  </div>
+
+  <div class="card">
+    <h2>All Fields (status/full, raw)</h2>
+    <div class="grid" id="all-grid"><div class="empty">No data yet</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Raw MQTT Feed</h2>
+    <div class="log" id="log"></div>
+  </div>
+
+</div>
+
+<script>
+// ============================================================
+// DIAGNOSTIC CODE TABLE — mirrors DiagnosticCodes.h. Only ever
+// append here if the firmware appends new codes; never renumber.
+// ============================================================
+const DIAG = {
+  0:  { text: 'OK — no insertion/fan inhibits active',                 sev: 'ok'   },
+  1:  { text: 'Fault — insertion & fans stopped',                      sev: 'crit' },
+  2:  { text: 'Main door open — no insertion or fan function',         sev: 'crit' },
+  3:  { text: 'System in standby — press Start',                       sev: 'none' },
+  4:  { text: 'Cooling down — auto-insertion off',                     sev: 'none' },
+  5:  { text: 'Warming up — auto-insertion starts once active',        sev: 'none' },
+  6:  { text: 'Motor system disabled — no insertion',                  sev: 'warn' },
+  7:  { text: 'Manual ventilation mode — auto-insertion off',          sev: 'warn' },
+  8:  { text: 'Auto-insertion disabled',                                sev: 'warn' },
+  9:  { text: 'Right magazine door open — auto-insertion paused',      sev: 'warn' },
+  10: { text: 'Left magazine door open — auto-insertion paused',       sev: 'warn' },
+  11: { text: 'Both magazine doors open — auto-insertion paused',      sev: 'warn' },
+  12: { text: 'No logs remaining — refill cartridges',                 sev: 'warn' },
+  13: { text: 'App unreachable — auto-insertion paused',               sev: 'warn' },
+  14: { text: 'WiFi disconnected — auto-insertion paused',             sev: 'warn' },
+  15: { text: 'Trapdoor not fully closed — insertion blocked',         sev: 'warn' },
+  16: { text: 'Insertion refused — minimum interval not elapsed',      sev: 'warn' },
+  17: { text: 'Manual insert refused — see serial log for reason',     sev: 'warn' },
+};
+
+// ============================================================
+// STATE
+// ============================================================
+const LS = 'woodmood_debug_cfg';
+let cfg = JSON.parse(localStorage.getItem(LS) || '{}');
+let client = null;
+let prefix = '';
+let msgCount = 0;
+let full = {};   // parsed status/full
+let stats = {};  // parsed status/stats
+let extra = {};  // other individual topics: online, firmware, ntfy_link, diag, fault_msg
+
+window.addEventListener('load', () => {
+  fillForm();
+});
+
+function fillForm() {
+  document.getElementById('cfg-broker').value = cfg.broker || '';
+  document.getElementById('cfg-port').value   = cfg.port   || '8084';
+  document.getElementById('cfg-user').value   = cfg.user   || '';
+  document.getElementById('cfg-pass').value   = cfg.pass   || '';
+  document.getElementById('cfg-serial').value = cfg.serial || '';
+}
+
+function toggleConnect() {
+  if (client) { disconnect(); } else { saveAndConnect(); }
+}
+
+function saveAndConnect() {
+  cfg.broker = document.getElementById('cfg-broker').value.trim();
+  cfg.port   = parseInt(document.getElementById('cfg-port').value.trim()) || 8084;
+  cfg.user   = document.getElementById('cfg-user').value.trim();
+  cfg.pass   = document.getElementById('cfg-pass').value.trim();
+  cfg.serial = document.getElementById('cfg-serial').value.trim();
+  if (!cfg.broker || !cfg.user || !cfg.serial) { alert('Fill in broker, username and device serial'); return; }
+  localStorage.setItem(LS, JSON.stringify(cfg));
+  connect();
+}
+
+function connect() {
+  prefix = 'WoodMood' + cfg.serial;
+  setDot('connecting', 'Connecting…');
+
+  client = mqtt.connect(`wss://${cfg.broker}:${cfg.port || 8084}/mqtt`, {
+    username: cfg.user,
+    password: cfg.pass,
+    clientId: 'woodmood-debug-' + Math.random().toString(16).substr(2, 8),
+    keepalive: 60,
+    reconnectPeriod: 5000,
+    connectTimeout: 10000,
+    rejectUnauthorized: false
+  });
+
+  client.on('connect', () => {
+    setDot('connected', 'Connected');
+    document.getElementById('conn-btn').textContent = 'Disconnect';
+    document.getElementById('conn-btn').classList.add('disconnect');
+    client.subscribe(prefix + '/#');
+  });
+
+  client.on('message', onMessage);
+  client.on('offline',   () => setDot('error', 'Offline'));
+  client.on('error',     () => setDot('error', 'Error'));
+  client.on('reconnect', () => setDot('connecting', 'Reconnecting…'));
+}
+
+function disconnect() {
+  if (client) { try { client.end(true); } catch(e){} client = null; }
+  setDot('', 'Disconnected');
+  document.getElementById('conn-btn').textContent = 'Connect';
+  document.getElementById('conn-btn').classList.remove('disconnect');
+}
+
+function setDot(state, label) {
+  const dot = document.getElementById('dot');
+  dot.className = 'dot' + (state ? ' ' + state : '');
+  document.getElementById('status-label').textContent = label;
+}
+
+// ============================================================
+// MESSAGE HANDLING
+// ============================================================
+function onMessage(topic, payloadBuf) {
+  const payload = payloadBuf.toString();
+  const sub = topic.replace(prefix + '/', '');
+  msgCount++;
+  document.getElementById('msg-count').textContent = msgCount + ' messages';
+
+  logRow(sub, payload);
+
+  if (sub === 'status/full') {
+    try { full = JSON.parse(payload); renderAll(); } catch(e) {}
+    return;
+  }
+  if (sub === 'status/stats') {
+    try { stats = JSON.parse(payload); renderStats(); } catch(e) {}
+    return;
+  }
+  if (sub === 'status/heartbeat') {
+    // Debug app acts as a valid heartbeat client so opening this tool alone
+    // doesn't itself trigger DIAG_HEARTBEAT_UNHEALTHY / suspend auto-insertion.
+    client.publish(prefix + '/cmd/heartbeat_ack', '1');
+    return;
+  }
+  if (sub === 'status/online' || sub === 'status/firmware' || sub === 'status/ntfy_link' ||
+      sub === 'status/diag' || sub === 'status/fault_msg' || sub === 'status/fault') {
+    extra[sub] = payload;
+    renderNet();
+    return;
+  }
+}
+
+function logRow(topic, payload) {
+  const log = document.getElementById('log');
+  const empty = log.querySelector('.empty');
+  if (empty) empty.remove();
+  const row = document.createElement('div');
+  row.className = 'log-row';
+  const t = new Date().toLocaleTimeString();
+  row.innerHTML = `<span class="log-time">${t}</span><span class="log-topic" title="${topic}">${topic}</span><span class="log-payload">${escapeHtml(payload)}</span>`;
+  log.prepend(row);
+  while (log.children.length > 300) log.removeChild(log.lastChild);
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ============================================================
+// RENDERING
+// ============================================================
+function kv(label, value, cls) {
+  return `<div class="kv"><div class="k">${label}</div><div class="v ${cls||''}">${value}</div></div>`;
+}
+function boolKv(label, val) {
+  if (val === undefined) return kv(label, '—', 'na');
+  return kv(label, val ? 'YES' : 'no', val ? 'bool-true' : 'bool-false');
+}
+
+function renderAll() {
+  renderBanner();
+  renderDoors();
+  renderFault();
+  renderTemp();
+  renderSystem();
+  renderNet();
+  renderAllFields();
+}
+
+function renderBanner() {
+  const el = document.getElementById('diag-banner');
+  const code = full.diag_code;
+  if (code === undefined) return;
+  const d = DIAG[code] || { text: full.diag_text || 'Unknown code', sev: 'warn' };
+  const sevClass = d.sev === 'ok' ? 'ok' : d.sev === 'crit' ? 'crit' : d.sev === 'warn' ? 'warn' : 'none';
+  el.className = 'banner ' + sevClass;
+  el.innerHTML = `<span>${full.diag_text || d.text}</span><span class="code">code ${code}</span>`;
+}
+
+function renderDoors() {
+  const g = document.getElementById('doors-grid');
+  g.innerHTML =
+    boolKv('Main door open', full.door_main) +
+    boolKv('Loading door open', full.door_load) +
+    boolKv('Auto-insertion enabled', full.auto_insert) +
+    kv('Log level — Left', full.log_l ?? '—') +
+    kv('Log level — Right', full.log_r ?? '—') +
+    boolKv('Heartbeat healthy', full.hb_healthy) +
+    boolKv('Joint service active', full.joint_active) +
+    kv('Joint service side', full.joint_side ?? '—');
+}
+
+function renderFault() {
+  const g = document.getElementById('fault-grid');
+  g.innerHTML =
+    boolKv('Fault active', full.fault) +
+    kv('Fault message', full.fault_msg || '—') +
+    kv('Fault side', full.fault_side || '—') +
+    boolKv('Ready to resolve', full.fault_ready);
+}
+
+function renderTemp() {
+  const g = document.getElementById('temp-grid');
+  g.innerHTML =
+    kv('Stove temp', (full.stove_temp ?? '—') + '°C') +
+    kv('Room temp (BLE)', full.room_temp_ok ? (full.room_temp + '°C') : 'unavailable') +
+    kv('Setpoint', (full.setpoint ?? '—') + '°C') +
+    kv('Room setpoint', (full.room_setpoint ?? '—') + '°C') +
+    kv('Fan mode', full.fan_mode || '—') +
+    kv('Main fan', (full.fan_main ?? '—') + '%') +
+    kv('Cooling fan', (full.fan_cooling ?? '—') + '%') +
+    boolKv('Auto setpoint', full.auto_setpoint) +
+    boolKv('Eco mode', full.eco_mode) +
+    kv('Eco floor', (full.eco_floor ?? '—') + '%') +
+    kv('Normal floor', (full.norm_floor ?? '—') + '%') +
+    boolKv('Max-temp protection', full.max_temp_prot) +
+    kv('Max-temp threshold', (full.max_temp_val ?? '—') + '°C') +
+    boolKv('Beeper enabled', full.beeper);
+}
+
+function renderSystem() {
+  const g = document.getElementById('system-grid');
+  const uptime = full.uptime !== undefined ? formatUptime(full.uptime) : '—';
+  g.innerHTML =
+    kv('System state', full.system_state || '—') +
+    boolKv('System active', full.system_active) +
+    kv('Uptime', uptime) +
+    boolKv('Schedule enabled', full.sched_enabled) +
+    kv('Schedule slot', full.sched_slot ?? '—') +
+    kv('Schedule setpoint', (full.sched_setpoint ?? '—') + '°C') +
+    boolKv('NTP time synced', full.ntp_synced);
+}
+
+function renderNet() {
+  const g = document.getElementById('net-grid');
+  let fw = {};
+  try { fw = JSON.parse(extra['status/firmware'] || '{}'); } catch(e) {}
+  g.innerHTML =
+    kv('Online (retained)', extra['status/online'] === '1' ? 'yes' : '—') +
+    kv('Local IP', full.local_ip || '—') +
+    kv('Firmware version', fw.version || full.fw_version || '—') +
+    kv('Branch', fw.branch || full.fw_branch || '—') +
+    kv('Commit', fw.commit || full.fw_commit || '—') +
+    kv('Build date', fw.build_date || full.fw_build || '—') +
+    kv('Heap free', full.heap_free !== undefined ? full.heap_free + ' B' : '—') +
+    kv('Heap min free', full.heap_min !== undefined ? full.heap_min + ' B' : '—') +
+    kv('Heap max alloc', full.heap_max_alloc !== undefined ? full.heap_max_alloc + ' B' : '—') +
+    kv('ntfy link', extra['status/ntfy_link'] || '—');
+}
+
+function renderStats() {
+  const g = document.getElementById('stats-grid');
+  g.innerHTML =
+    kv('Total logs inserted', stats.total_logs ?? '—') +
+    kv('Logs inserted — Left', stats.logs_left ?? '—') +
+    kv('Logs inserted — Right', stats.logs_right ?? '—') +
+    kv('Fault count', stats.faults ?? '—') +
+    kv('Boot count', stats.boots ?? '—') +
+    kv('Runtime hours', stats.runtime_hours ?? '—');
+}
+
+function renderAllFields() {
+  const g = document.getElementById('all-grid');
+  const keys = Object.keys(full).sort();
+  g.innerHTML = keys.map(k => {
+    const v = full[k];
+    if (typeof v === 'boolean') return boolKv(k, v);
+    return kv(k, v === '' ? '—' : v);
+  }).join('');
+}
+
+function formatUptime(sec) {
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return (d ? d + 'd ' : '') + (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + s + 's';
+}
+</script>
+</body>
+</html>
