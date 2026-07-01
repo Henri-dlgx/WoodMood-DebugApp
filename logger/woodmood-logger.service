@@ -1,0 +1,15 @@
+[Unit]
+Description=WoodMood MQTT history logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/woodmood-logger/.env
+WorkingDirectory=/opt/woodmood-logger
+ExecStart=/usr/bin/python3 /opt/woodmood-logger/logger.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
