@@ -33,6 +33,9 @@
   .btn-share{background:#3a3f4b;color:var(--text);white-space:nowrap}
   .share-note{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.4}
 
+  .export-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .export-label{font-size:12px;color:var(--dim)}
+
   .status-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--dim)}
   .dot{width:9px;height:9px;border-radius:50%;background:#555}
   .dot.connecting{background:var(--amber);animation:pulse 1s infinite}
@@ -153,6 +156,19 @@
   </div>
 
   <div class="card">
+    <h2>Export History (CSV)</h2>
+    <div class="export-row">
+      <label class="export-label">Last</label>
+      <input id="export-hours" type="number" min="0.1" step="0.5" value="1" style="width:70px"/>
+      <label class="export-label">hours</label>
+      <button class="btn-share" onclick="downloadCsv(false)">Download CSV</button>
+      <button class="btn-share" onclick="downloadCsv(true)">Download all recorded data</button>
+      <button class="btn-share" onclick="clearHistory()">Clear recorded history</button>
+    </div>
+    <div class="share-note" id="history-info">No data recorded yet.</div>
+  </div>
+
+  <div class="card">
     <h2>Raw MQTT Feed</h2>
     <div class="log" id="log"></div>
   </div>
@@ -199,10 +215,20 @@ let lastInsertBaseSec = null;  // last_insert_ago_sec as of the most recent stat
 let lastInsertBaseAt  = null;  // Date.now() when that value was received
 let extra = {};  // other individual topics: online, firmware, ntfy_link, diag, fault_msg
 
+// ============================================================
+// HISTORY RECORDING (for CSV export)
+// ============================================================
+const HISTORY_LS = 'woodmood_debug_history';
+const HISTORY_SAMPLE_MS = 15000;         // one recorded row every 15s
+const HISTORY_RETENTION_MS = 24 * 3600000; // keep at most 24h of rows
+let history = [];
+let lastRecordedAt = 0;
+
 window.addEventListener('load', () => {
   fillForm();
   tickClock();
   setInterval(tickClock, 1000);
+  loadHistory();
 });
 
 // ============================================================
@@ -360,7 +386,7 @@ function onMessage(topic, payloadBuf) {
   logRow(sub, payload);
 
   if (sub === 'status/full') {
-    try { full = JSON.parse(payload); renderAll(); } catch(e) {}
+    try { full = JSON.parse(payload); renderAll(); recordHistory(); } catch(e) {}
     return;
   }
   if (sub === 'status/stats') {
@@ -531,6 +557,91 @@ function formatUptime(sec) {
   const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
   return (d ? d + 'd ' : '') + (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + s + 's';
+}
+
+// ============================================================
+// HISTORY RECORDING / CSV EXPORT
+// ============================================================
+function loadHistory() {
+  try { history = JSON.parse(localStorage.getItem(HISTORY_LS) || '[]'); } catch (e) { history = []; }
+  pruneHistory();
+  updateHistoryInfo();
+}
+
+function pruneHistory() {
+  const cutoff = Date.now() - HISTORY_RETENTION_MS;
+  history = history.filter(row => row._ts >= cutoff);
+}
+
+function saveHistory() {
+  pruneHistory();
+  try {
+    localStorage.setItem(HISTORY_LS, JSON.stringify(history));
+  } catch (e) {
+    // Quota exceeded — drop the oldest half and try once more, then give up silently.
+    history = history.slice(Math.floor(history.length / 2));
+    try { localStorage.setItem(HISTORY_LS, JSON.stringify(history)); } catch (e2) {}
+  }
+}
+
+function recordHistory() {
+  const now = Date.now();
+  if (now - lastRecordedAt < HISTORY_SAMPLE_MS) return;
+  lastRecordedAt = now;
+  history.push(Object.assign({ _ts: now }, full));
+  saveHistory();
+  updateHistoryInfo();
+}
+
+function updateHistoryInfo() {
+  const el = document.getElementById('history-info');
+  if (!el) return;
+  if (history.length === 0) { el.textContent = 'No data recorded yet — leave this page open and connected to build up history.'; return; }
+  const spanMin = Math.round((Date.now() - history[0]._ts) / 60000);
+  const spanText = spanMin < 60 ? spanMin + ' min' : (spanMin / 60).toFixed(1) + ' hours';
+  el.textContent = `${history.length} samples recorded, covering the last ${spanText} `
+    + `(one sample every ${HISTORY_SAMPLE_MS / 1000}s, kept for up to 24h while this page stays open).`;
+}
+
+function clearHistory() {
+  if (!confirm('Clear all recorded history? This cannot be undone.')) return;
+  history = [];
+  localStorage.removeItem(HISTORY_LS);
+  updateHistoryInfo();
+}
+
+function csvEscape(v) {
+  if (v === undefined || v === null) return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function downloadCsv(all) {
+  let rows = history;
+  if (!all) {
+    const hours = parseFloat(document.getElementById('export-hours').value) || 1;
+    const cutoff = Date.now() - hours * 3600000;
+    rows = history.filter(r => r._ts >= cutoff);
+  }
+  if (rows.length === 0) { alert('No recorded data in that time range yet.'); return; }
+
+  // Union of every key ever seen so a mid-session firmware field change doesn't break the export.
+  const keySet = new Set();
+  rows.forEach(r => Object.keys(r).forEach(k => { if (k !== '_ts') keySet.add(k); }));
+  const keys = Array.from(keySet).sort();
+
+  const lines = [['timestamp', ...keys].join(',')];
+  rows.forEach(r => lines.push([new Date(r._ts).toISOString(), ...keys.map(k => csvEscape(r[k]))].join(',')));
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `woodmood_${cfg.serial || 'device'}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 </script>
 </body>
