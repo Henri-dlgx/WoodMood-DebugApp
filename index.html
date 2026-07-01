@@ -52,8 +52,8 @@
   .kv{background:#0d0f14;border-radius:6px;padding:8px 10px}
   .kv .k{font-size:11px;color:var(--dim);margin-bottom:2px}
   .kv .v{font-size:14px;font-weight:600;word-break:break-word}
-  .v.bool-true{color:var(--red)}
-  .v.bool-false{color:var(--green)}
+  .v.alert{color:var(--red)}
+  .v.ok{color:var(--green)}
   .v.na{color:var(--dim);font-weight:400}
 
   .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -403,9 +403,13 @@ function escapeHtml(s) {
 function kv(label, value, cls) {
   return `<div class="kv"><div class="k">${label}</div><div class="v ${cls||''}">${value}</div></div>`;
 }
-function boolKv(label, val) {
+// By default YES/on is green and NO/off is red — most fields here are settings
+// or health flags where "on" is the good state. Pass invert:true for fields
+// where YES means a problem (doors open, fault, schedule overriding the norm).
+function boolKv(label, val, invert) {
   if (val === undefined) return kv(label, '—', 'na');
-  return kv(label, val ? 'YES' : 'no', val ? 'bool-true' : 'bool-false');
+  const isAlert = invert ? val : !val;
+  return kv(label, val ? 'YES' : 'no', isAlert ? 'alert' : 'ok');
 }
 
 function renderAll() {
@@ -432,8 +436,8 @@ function renderBanner() {
 function renderDoors() {
   const g = document.getElementById('doors-grid');
   g.innerHTML =
-    boolKv('Main door open', full.door_main) +
-    boolKv('Loading door open', full.door_load) +
+    boolKv('Main door open', full.door_main, true) +
+    boolKv('Loading door open', full.door_load, true) +
     boolKv('Auto-insertion enabled', full.auto_insert) +
     kv('Log level — Left', full.log_l ?? '—') +
     kv('Log level — Right', full.log_r ?? '—') +
@@ -445,7 +449,7 @@ function renderDoors() {
 function renderFault() {
   const g = document.getElementById('fault-grid');
   g.innerHTML =
-    boolKv('Fault active', full.fault) +
+    boolKv('Fault active', full.fault, true) +
     kv('Fault message', full.fault_msg || '—') +
     kv('Fault side', full.fault_side || '—') +
     boolKv('Ready to resolve', full.fault_ready);
@@ -477,7 +481,7 @@ function renderSystem() {
     kv('System state', full.system_state || '—') +
     boolKv('System active', full.system_active) +
     kv('Uptime', uptime) +
-    boolKv('Schedule enabled', full.sched_enabled) +
+    boolKv('Schedule enabled', full.sched_enabled, true) +
     kv('Schedule slot', full.sched_slot ?? '—') +
     kv('Schedule setpoint', (full.sched_setpoint ?? '—') + '°C') +
     boolKv('NTP time synced', full.ntp_synced);
