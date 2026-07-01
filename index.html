@@ -28,6 +28,11 @@
   .btn-connect{background:var(--blue);color:#fff}
   .btn-connect.disconnect{background:#3a3f4b;color:var(--text)}
 
+  .share-row{display:flex;gap:8px;margin-top:10px}
+  .share-row input{flex:1;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .btn-share{background:#3a3f4b;color:var(--text);white-space:nowrap}
+  .share-note{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.4}
+
   .status-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--dim)}
   .dot{width:9px;height:9px;border-radius:50%;background:#555}
   .dot.connecting{background:var(--amber);animation:pulse 1s infinite}
@@ -84,6 +89,12 @@
       <span id="status-label">Disconnected</span>
       <span id="msg-count" style="margin-left:auto"></span>
     </div>
+    <div class="share-row">
+      <input id="share-string" placeholder="Paste a config string here to auto-fill &amp; connect…"/>
+      <button class="btn-share" onclick="loadConfigString()">Load</button>
+      <button class="btn-share" onclick="copyConfigString()">Copy my config as a string</button>
+    </div>
+    <div class="share-note">Fill in the fields above once, then "Copy my config as a string" and send that string instead of talking someone through 5 boxes — they paste it here and hit Load. It's just base64, not encryption, so only share it with people you trust.</div>
   </div>
 
   <div class="banner none" id="diag-banner">
@@ -182,6 +193,51 @@ function fillForm() {
   document.getElementById('cfg-user').value   = cfg.user   || '';
   document.getElementById('cfg-pass').value   = cfg.pass   || '';
   document.getElementById('cfg-serial').value = cfg.serial || '';
+}
+
+// ============================================================
+// SHARE / IMPORT CONFIG STRING
+// ============================================================
+function buildConfigString() {
+  const c = {
+    broker: document.getElementById('cfg-broker').value.trim(),
+    port:   document.getElementById('cfg-port').value.trim(),
+    user:   document.getElementById('cfg-user').value.trim(),
+    pass:   document.getElementById('cfg-pass').value.trim(),
+    serial: document.getElementById('cfg-serial').value.trim()
+  };
+  if (!c.broker || !c.user || !c.serial) { alert('Fill in broker, username and device serial above first.'); return null; }
+  return 'WM1:' + btoa(unescape(encodeURIComponent(JSON.stringify(c))));
+}
+
+function copyConfigString() {
+  const str = buildConfigString();
+  if (!str) return;
+  const box = document.getElementById('share-string');
+  box.value = str;
+  navigator.clipboard.writeText(str).then(() => {
+    alert('Config string copied — paste it into a message.');
+  }).catch(() => {
+    box.select();
+    alert('Could not auto-copy — the string is selected below, copy it manually.');
+  });
+}
+
+function loadConfigString() {
+  const raw = document.getElementById('share-string').value.trim();
+  if (!raw) { alert('Paste a config string first.'); return; }
+  try {
+    const body = raw.startsWith('WM1:') ? raw.slice(4) : raw;
+    const c = JSON.parse(decodeURIComponent(escape(atob(body))));
+    document.getElementById('cfg-broker').value = c.broker || '';
+    document.getElementById('cfg-port').value   = c.port   || '8084';
+    document.getElementById('cfg-user').value   = c.user   || '';
+    document.getElementById('cfg-pass').value   = c.pass   || '';
+    document.getElementById('cfg-serial').value = c.serial || '';
+    saveAndConnect();
+  } catch (e) {
+    alert("That doesn't look like a valid config string.");
+  }
 }
 
 function toggleConnect() {
