@@ -66,6 +66,11 @@
   .log-payload{color:var(--text);word-break:break-all}
 
   .empty{color:var(--dim);text-align:center;padding:20px;font-size:13px}
+
+  .li-row{display:flex;gap:10px}
+  .li-stat{flex:1;background:#0d0f14;border-radius:8px;padding:12px 8px;text-align:center}
+  .li-val{font-size:22px;font-weight:700}
+  .li-label{font-size:11px;color:var(--dim);margin-top:4px}
 </style>
 </head>
 <body>
@@ -99,6 +104,15 @@
 
   <div class="banner none" id="diag-banner">
     <span>Connect to see the current diagnostic status.</span>
+  </div>
+
+  <div class="card">
+    <h2>Last Insertion</h2>
+    <div class="li-row">
+      <div class="li-stat"><div class="li-val" id="li-time">—</div><div class="li-label">Current time</div></div>
+      <div class="li-stat"><div class="li-val" id="li-ago">—</div><div class="li-label">Since last insert</div></div>
+      <div class="li-stat"><div class="li-val" id="li-side">—</div><div class="li-label">Side &amp; position</div></div>
+    </div>
   </div>
 
   <div class="two-col">
@@ -181,11 +195,50 @@ let prefix = '';
 let msgCount = 0;
 let full = {};   // parsed status/full
 let stats = {};  // parsed status/stats
+let lastInsertBaseSec = null;  // last_insert_ago_sec as of the most recent status/full
+let lastInsertBaseAt  = null;  // Date.now() when that value was received
 let extra = {};  // other individual topics: online, firmware, ntfy_link, diag, fault_msg
 
 window.addEventListener('load', () => {
   fillForm();
+  tickClock();
+  setInterval(tickClock, 1000);
 });
+
+// ============================================================
+// LIVE CLOCK / LAST-INSERTION TICKER
+// ============================================================
+function tickClock() {
+  document.getElementById('li-time').textContent =
+    new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+  const el = document.getElementById('li-ago');
+  if (lastInsertBaseSec === null) { el.textContent = full.last_insert_ever === false ? 'Never' : '—'; return; }
+  const extraSec = Math.floor((Date.now() - lastInsertBaseAt) / 1000);
+  el.textContent = formatDuration(lastInsertBaseSec + extraSec);
+}
+
+function formatDuration(totalSec) {
+  totalSec = Math.max(0, totalSec);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return (h ? h + 'h' + String(m).padStart(2, '0') : m) + 'min' + String(s).padStart(2, '0');
+}
+
+function renderLastInsert() {
+  const sideEl = document.getElementById('li-side');
+  if (!full.last_insert_ever) {
+    lastInsertBaseSec = null;
+    sideEl.textContent = '—';
+    return;
+  }
+  lastInsertBaseSec = full.last_insert_ago_sec ?? 0;
+  lastInsertBaseAt  = Date.now();
+  const side = full.last_insert_side || '—';
+  const pos = side === 'Right' ? full.log_r : side === 'Left' ? full.log_l : undefined;
+  sideEl.textContent = side + (pos !== undefined ? ' ' + pos : '');
+}
 
 function fillForm() {
   document.getElementById('cfg-broker').value = cfg.broker || '';
@@ -357,6 +410,7 @@ function boolKv(label, val) {
 
 function renderAll() {
   renderBanner();
+  renderLastInsert();
   renderDoors();
   renderFault();
   renderTemp();
