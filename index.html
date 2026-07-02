@@ -74,6 +74,10 @@
   .li-stat{flex:1;background:#0d0f14;border-radius:8px;padding:12px 8px;text-align:center}
   .li-val{font-size:22px;font-weight:700}
   .li-label{font-size:11px;color:var(--dim);margin-top:4px}
+
+  .tabs{display:flex;gap:6px;margin-bottom:14px}
+  .tab-btn{background:var(--card);border:1px solid var(--border);color:var(--dim);border-radius:8px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer}
+  .tab-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
 </style>
 </head>
 <body>
@@ -81,6 +85,13 @@
 
   <h1>WoodMood Debug</h1>
   <div class="sub">Live MQTT inspector — shows every value the stove publishes so you can see exactly why something isn't running.</div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-btn-live" onclick="switchTab('live')">Live</button>
+    <button class="tab-btn" id="tab-btn-history" onclick="switchTab('history')">History</button>
+  </div>
+
+  <div id="tab-live">
 
   <div class="card">
     <h2>Connection</h2>
@@ -173,6 +184,46 @@
     <div class="log" id="log"></div>
   </div>
 
+  </div>
+
+  <div id="tab-history" style="display:none">
+
+  <div class="card">
+    <h2>Cloud Database (Supabase)</h2>
+    <div class="conn-grid" style="grid-template-columns:2fr 2fr auto">
+      <input id="supa-url" placeholder="Project URL — e.g. https://xxxx.supabase.co"/>
+      <input id="supa-key" placeholder="anon public API key" type="password"/>
+      <button class="btn-connect" onclick="saveSupabaseConfig()">Save</button>
+    </div>
+    <div class="share-note">This page only ever uses the read-only <b>anon</b> key, which can read but not write or delete rows (enforced by Postgres row-level security on the <code>logs</code> table). Writes are done server-side by an EMQX Cloud rule using a separate key that never touches this page.</div>
+  </div>
+
+  <div class="card">
+    <h2>Query</h2>
+    <div class="export-row">
+      <label class="export-label">Last</label>
+      <input id="hist-hours" type="number" min="0.5" step="0.5" value="24" style="width:70px"/>
+      <label class="export-label">hours</label>
+      <label class="export-label">Topic</label>
+      <input id="hist-topic" placeholder="blank = all topics" style="width:240px"/>
+      <button class="btn-share" onclick="fetchHistory()">Fetch</button>
+      <button class="btn-share" onclick="downloadHistoryCsv()">Download CSV</button>
+    </div>
+    <div class="share-note" id="hist-info">Enter your Supabase project details above, then Fetch.</div>
+  </div>
+
+  <div class="card">
+    <h2>Stove Temp Trend</h2>
+    <canvas id="hist-chart" width="960" height="160" style="width:100%;height:160px;display:block"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>Rows</h2>
+    <div class="log" id="hist-table" style="height:420px"><div class="empty">No data yet</div></div>
+  </div>
+
+  </div>
+
 </div>
 
 <script>
@@ -229,7 +280,18 @@ window.addEventListener('load', () => {
   tickClock();
   setInterval(tickClock, 1000);
   loadHistory();
+  fillSupabaseForm();
 });
+
+// ============================================================
+// TABS
+// ============================================================
+function switchTab(name) {
+  document.getElementById('tab-live').style.display = name === 'live' ? '' : 'none';
+  document.getElementById('tab-history').style.display = name === 'history' ? '' : 'none';
+  document.getElementById('tab-btn-live').classList.toggle('active', name === 'live');
+  document.getElementById('tab-btn-history').classList.toggle('active', name === 'history');
+}
 
 // ============================================================
 // LIVE CLOCK / LAST-INSERTION TICKER
@@ -638,6 +700,115 @@ function downloadCsv(all) {
   const a = document.createElement('a');
   a.href = url;
   a.download = `woodmood_${cfg.serial || 'device'}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
+// HISTORY TAB (Supabase-backed long-term storage, survives the
+// page being closed — written server-side by an EMQX Cloud rule)
+// ============================================================
+const SUPA_LS = 'woodmood_debug_supabase';
+let supaCfg = JSON.parse(localStorage.getItem(SUPA_LS) || '{}');
+let histRows = [];
+
+function fillSupabaseForm() {
+  document.getElementById('supa-url').value = supaCfg.url || '';
+  document.getElementById('supa-key').value = supaCfg.key || '';
+  const topicEl = document.getElementById('hist-topic');
+  if (cfg.serial) topicEl.placeholder = `blank = all topics, e.g. WoodMood${cfg.serial}/status/full`;
+}
+
+function saveSupabaseConfig() {
+  supaCfg.url = document.getElementById('supa-url').value.trim().replace(/\/$/, '');
+  supaCfg.key = document.getElementById('supa-key').value.trim();
+  if (!supaCfg.url || !supaCfg.key) { alert('Fill in both the project URL and the anon key'); return; }
+  localStorage.setItem(SUPA_LS, JSON.stringify(supaCfg));
+  alert('Saved.');
+}
+
+async function fetchHistory() {
+  if (!supaCfg.url || !supaCfg.key) { alert('Save your Supabase project URL and anon key first.'); return; }
+  const info = document.getElementById('hist-info');
+  info.textContent = 'Loading…';
+  const hours = parseFloat(document.getElementById('hist-hours').value) || 24;
+  const topic = document.getElementById('hist-topic').value.trim();
+  const since = new Date(Date.now() - hours * 3600000).toISOString();
+  let q = `${supaCfg.url}/rest/v1/logs?select=topic,payload,received_at&received_at=gte.${encodeURIComponent(since)}&order=received_at.asc&limit=5000`;
+  if (topic) q += `&topic=eq.${encodeURIComponent(topic)}`;
+  try {
+    const res = await fetch(q, { headers: { apikey: supaCfg.key, Authorization: `Bearer ${supaCfg.key}` } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    histRows = await res.json();
+  } catch (e) {
+    info.textContent = `Fetch failed: ${e.message}`;
+    return;
+  }
+  info.textContent = `${histRows.length} rows over the last ${hours}h` + (topic ? ` for ${topic}` : '');
+  renderHistoryTable();
+  renderHistoryChart();
+}
+
+// payload comes back from PostgREST already parsed (the `logs.payload` column
+// is jsonb) — it may be an object, a bare number, or a string depending on topic.
+function payloadToString(v) {
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+function renderHistoryTable() {
+  const el = document.getElementById('hist-table');
+  if (histRows.length === 0) { el.innerHTML = '<div class="empty">No rows</div>'; return; }
+  el.innerHTML = histRows.slice().reverse().slice(0, 500).map(r => {
+    const t = new Date(r.received_at).toLocaleString();
+    return `<div class="log-row"><span class="log-time">${t}</span><span class="log-topic" title="${r.topic}">${r.topic}</span><span class="log-payload">${escapeHtml(payloadToString(r.payload))}</span></div>`;
+  }).join('');
+}
+
+function renderHistoryChart() {
+  const canvas = document.getElementById('hist-chart');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const points = [];
+  histRows.forEach(r => {
+    const p = r.payload;
+    if (p && typeof p === 'object' && typeof p.stove_temp === 'number') {
+      points.push({ t: new Date(r.received_at).getTime(), v: p.stove_temp });
+    }
+  });
+  if (points.length < 2) {
+    ctx.fillStyle = '#8a90a2';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Not enough status/full samples with stove_temp in range', 10, 80);
+    return;
+  }
+  const xs = points.map(p => p.t), ys = points.map(p => p.v);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const pad = 20, W = canvas.width, H = canvas.height;
+  const sx = t => pad + (t - xMin) / (xMax - xMin || 1) * (W - 2 * pad);
+  const sy = v => H - pad - (v - yMin) / (yMax - yMin || 1) * (H - 2 * pad);
+  ctx.strokeStyle = '#4a9eff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  points.forEach((p, i) => { const x = sx(p.t), y = sy(p.v); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+  ctx.stroke();
+  ctx.fillStyle = '#8a90a2';
+  ctx.font = '11px sans-serif';
+  ctx.fillText(`${yMax.toFixed(0)}°C`, 4, pad);
+  ctx.fillText(`${yMin.toFixed(0)}°C`, 4, H - pad + 4);
+}
+
+function downloadHistoryCsv() {
+  if (histRows.length === 0) { alert('Fetch some data first.'); return; }
+  const lines = ['received_at,topic,payload'];
+  histRows.forEach(r => lines.push([r.received_at, csvEscape(r.topic), csvEscape(payloadToString(r.payload))].join(',')));
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `woodmood_cloud_history_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
