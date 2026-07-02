@@ -214,19 +214,35 @@
   </div>
 
   <div class="card">
-    <h2>Fields to Plot</h2>
+    <h2>Numeric Fields to Plot</h2>
     <div class="share-row" style="margin-top:0">
-      <button class="btn-share" onclick="setAllFieldChecks(true)">Select all</button>
-      <button class="btn-share" onclick="setAllFieldChecks(false)">Select none</button>
+      <button class="btn-share" onclick="setAllFieldChecks('numeric', true)">Select all</button>
+      <button class="btn-share" onclick="setAllFieldChecks('numeric', false)">Select none</button>
     </div>
-    <div class="grid" id="hist-fields" style="margin-top:10px"><div class="empty">Fetch data first — every numeric/boolean field found in the range will show up here.</div></div>
+    <div class="grid" id="hist-fields-numeric" style="margin-top:10px"><div class="empty">Fetch data first — every field that varies (temps, %, counts…) shows up here.</div></div>
   </div>
 
   <div class="card">
-    <h2>Parameter Trends</h2>
+    <h2>Numeric Trends</h2>
     <div class="share-note" style="margin-top:0;margin-bottom:8px">Each line is scaled to its own min/max (shown in the legend) so fields with very different ranges — like °C vs a percentage — can be compared on one chart.</div>
     <canvas id="hist-chart" width="960" height="260" style="width:100%;height:260px;display:block"></canvas>
     <div class="grid" id="hist-legend" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Binary / State Fields to Plot</h2>
+    <div class="share-row" style="margin-top:0">
+      <button class="btn-share" onclick="setAllFieldChecks('binary', true)">Select all</button>
+      <button class="btn-share" onclick="setAllFieldChecks('binary', false)">Select none</button>
+    </div>
+    <div class="grid" id="hist-fields-binary" style="margin-top:10px"><div class="empty">Fetch data first — on/off fields (doors, faults, toggles…) show up here.</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Binary / State Timeline</h2>
+    <div class="share-note" style="margin-top:0;margin-bottom:8px">Each field gets its own lane. Filled = on/true, faint = off/false — partial fill within a bucket means it toggled during that stretch.</div>
+    <canvas id="hist-chart-binary" width="960" height="200" style="width:100%;height:200px;display:block"></canvas>
+    <div class="grid" id="hist-legend-binary" style="margin-top:10px"></div>
   </div>
 
   <div class="card">
@@ -813,31 +829,42 @@ function analyzeHistory() {
   renderFieldCheckboxes();
   renderFieldStatsTable();
   renderHistoryChart();
+  renderBinaryChart();
 }
 
 function fmtNum(v) {
   return Number.isInteger(v) ? String(v) : v.toFixed(2);
 }
 
-function renderFieldCheckboxes() {
-  const el = document.getElementById('hist-fields');
-  if (discoveredFields.length === 0) { el.innerHTML = '<div class="empty">No numeric/boolean fields found in the fetched range</div>'; return; }
-  el.innerHTML = discoveredFields.map(f => `
+function numericFields() { return discoveredFields.filter(f => !fieldStats.get(f).isBoolean); }
+function binaryFields()  { return discoveredFields.filter(f => fieldStats.get(f).isBoolean); }
+
+function renderFieldCheckboxGroup(elId, fields, emptyMsg) {
+  const el = document.getElementById(elId);
+  if (fields.length === 0) { el.innerHTML = `<div class="empty">${emptyMsg}</div>`; return; }
+  el.innerHTML = fields.map(f => `
     <label class="kv" style="display:flex;align-items:center;gap:6px;cursor:pointer">
       <input type="checkbox" ${selectedFields.has(f) ? 'checked' : ''} onchange="toggleField('${f}', this.checked)"/>
       <span>${f}</span>
     </label>`).join('');
 }
 
-function toggleField(field, checked) {
-  if (checked) selectedFields.add(field); else selectedFields.delete(field);
-  renderHistoryChart();
+function renderFieldCheckboxes() {
+  renderFieldCheckboxGroup('hist-fields-numeric', numericFields(), 'No numeric fields found in the fetched range');
+  renderFieldCheckboxGroup('hist-fields-binary', binaryFields(), 'No binary/state fields found in the fetched range');
 }
 
-function setAllFieldChecks(on) {
-  discoveredFields.forEach(f => on ? selectedFields.add(f) : selectedFields.delete(f));
+function toggleField(field, checked) {
+  if (checked) selectedFields.add(field); else selectedFields.delete(field);
+  if (fieldStats.get(field) && fieldStats.get(field).isBoolean) renderBinaryChart();
+  else renderHistoryChart();
+}
+
+function setAllFieldChecks(group, on) {
+  const fields = group === 'binary' ? binaryFields() : numericFields();
+  fields.forEach(f => on ? selectedFields.add(f) : selectedFields.delete(f));
   renderFieldCheckboxes();
-  renderHistoryChart();
+  if (group === 'binary') renderBinaryChart(); else renderHistoryChart();
 }
 
 function renderFieldStatsTable() {
@@ -904,12 +931,12 @@ function renderHistoryChart() {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const legend = document.getElementById('hist-legend');
-  const fields = discoveredFields.filter(f => selectedFields.has(f));
+  const fields = numericFields().filter(f => selectedFields.has(f));
 
   if (histRows.length === 0 || fields.length === 0) {
     ctx.fillStyle = '#8a90a2';
     ctx.font = '12px sans-serif';
-    ctx.fillText(histRows.length === 0 ? 'Fetch data first' : 'Check a field above to plot it', 10, 80);
+    ctx.fillText(histRows.length === 0 ? 'Fetch data first' : 'Check a numeric field above to plot it', 10, 80);
     legend.innerHTML = '';
     return;
   }
@@ -948,6 +975,62 @@ function renderHistoryChart() {
     const vMin = Math.min(...vs), vMax = Math.max(...vs), vLast = vs[vs.length - 1];
     return `<div class="kv"><div class="k"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${s.color};margin-right:5px"></span>${s.field}</div>`
       + `<div class="v">min ${fmtNum(vMin)} · max ${fmtNum(vMax)} · last ${fmtNum(vLast)}</div></div>`;
+  }).join('');
+}
+
+// Each selected boolean field gets its own horizontal lane instead of an
+// overlapping 0/1 step line — much easier to scan for "when was this open/on."
+// Downsampled buckets average true/false into a 0..1 duty cycle, drawn as
+// fill opacity, so a lane that toggled rapidly within a bucket still reads
+// as "partially on" rather than aliasing to a misleading solid on/off block.
+function renderBinaryChart() {
+  const canvas = document.getElementById('hist-chart-binary');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const legend = document.getElementById('hist-legend-binary');
+  const fields = binaryFields().filter(f => selectedFields.has(f));
+
+  if (histRows.length === 0 || fields.length === 0) {
+    ctx.fillStyle = '#8a90a2';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(histRows.length === 0 ? 'Fetch data first' : 'Check a binary field above to plot it', 10, 40);
+    legend.innerHTML = '';
+    return;
+  }
+
+  const pad = 4, labelW = 90, W = canvas.width, H = canvas.height;
+  let xMin = Infinity, xMax = -Infinity;
+  histRows.forEach(r => {
+    const t = new Date(r.received_at).getTime();
+    if (t < xMin) xMin = t;
+    if (t > xMax) xMax = t;
+  });
+  const sx = t => labelW + (t - xMin) / (xMax - xMin || 1) * (W - labelW - pad);
+  const laneH = (H - pad) / fields.length;
+
+  legend.innerHTML = fields.map((field, idx) => {
+    const color = CHART_PALETTE[idx % CHART_PALETTE.length];
+    const pts = downsample(fieldSeries(field), CHART_MAX_POINTS);
+    const laneTop = idx * laneH;
+    const barTop = laneTop + 3, barBottom = laneTop + laneH - 5;
+
+    ctx.fillStyle = '#8a90a2';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(field, 2, laneTop + laneH / 2 + 4);
+
+    for (let i = 0; i < pts.length; i++) {
+      const xStart = sx(pts[i].t);
+      const xEnd = i < pts.length - 1 ? sx(pts[i + 1].t) : W - pad;
+      ctx.fillStyle = color;
+      ctx.globalAlpha = pts[i].v <= 0 ? 0.08 : (0.25 + 0.65 * pts[i].v);
+      ctx.fillRect(xStart, barTop, Math.max(1, xEnd - xStart), barBottom - barTop);
+    }
+    ctx.globalAlpha = 1;
+
+    const s = fieldStats.get(field);
+    const pct = (100 * s.trueCount / s.count).toFixed(0);
+    return `<div class="kv"><div class="k"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:5px"></span>${field}</div>`
+      + `<div class="v">true ${pct}% of samples</div></div>`;
   }).join('');
 }
 
