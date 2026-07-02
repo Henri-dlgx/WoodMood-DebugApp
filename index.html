@@ -207,14 +207,31 @@
       <label class="export-label">Topic</label>
       <input id="hist-topic" placeholder="blank = all topics" style="width:240px"/>
       <button class="btn-share" onclick="fetchHistory()">Fetch</button>
-      <button class="btn-share" onclick="downloadHistoryCsv()">Download CSV</button>
+      <button class="btn-share" onclick="downloadHistoryCsv()">Download raw CSV</button>
+      <button class="btn-share" onclick="downloadHistoryWideCsv()">Download wide CSV (spreadsheet-ready)</button>
     </div>
     <div class="share-note" id="hist-info">Enter your Supabase project details above, then Fetch.</div>
   </div>
 
   <div class="card">
-    <h2>Stove Temp Trend</h2>
-    <canvas id="hist-chart" width="960" height="160" style="width:100%;height:160px;display:block"></canvas>
+    <h2>Fields to Plot</h2>
+    <div class="share-row" style="margin-top:0">
+      <button class="btn-share" onclick="setAllFieldChecks(true)">Select all</button>
+      <button class="btn-share" onclick="setAllFieldChecks(false)">Select none</button>
+    </div>
+    <div class="grid" id="hist-fields" style="margin-top:10px"><div class="empty">Fetch data first — every numeric/boolean field found in the range will show up here.</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Parameter Trends</h2>
+    <div class="share-note" style="margin-top:0;margin-bottom:8px">Each line is scaled to its own min/max (shown in the legend) so fields with very different ranges — like °C vs a percentage — can be compared on one chart.</div>
+    <canvas id="hist-chart" width="960" height="260" style="width:100%;height:260px;display:block"></canvas>
+    <div class="grid" id="hist-legend" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Field Summary (whole fetched range)</h2>
+    <div class="log" id="hist-stats-table" style="height:260px"><div class="empty">No data yet</div></div>
   </div>
 
   <div class="card">
@@ -729,8 +746,11 @@ function saveSupabaseConfig() {
   alert('Saved.');
 }
 
-const HIST_PAGE_SIZE = 1000;   // Supabase's PostgREST default max rows per request
-const HIST_MAX_ROWS = 20000;   // safety cap so a wide range doesn't hang the tab — use the SQL Editor directly for bigger pulls
+const HIST_PAGE_SIZE = 1000;    // Supabase's PostgREST default max rows per request
+const HIST_MAX_ROWS = 100000;   // covers a full day at current publish rates — use the SQL Editor directly for bigger pulls
+let discoveredFields = [];      // every numeric/boolean field name seen in the fetched range
+let fieldStats = new Map();     // field -> { count, min, max, sum, last, isBoolean, trueCount }
+let selectedFields = new Set(['stove_temp']);   // which fields are checked in the chart
 
 async function fetchHistory() {
   if (!supaCfg.url || !supaCfg.key) { alert('Save your Supabase project URL and anon key first.'); return; }
@@ -761,7 +781,75 @@ async function fetchHistory() {
   const capped = rows.length >= HIST_MAX_ROWS ? ` — capped at ${HIST_MAX_ROWS}, narrow the range/topic for a complete set` : '';
   info.textContent = `${histRows.length} rows over the last ${hours}h` + (topic ? ` for ${topic}` : '') + capped;
   renderHistoryTable();
+  analyzeHistory();
+}
+
+// ============================================================
+// FIELD DISCOVERY & SUMMARY STATS (drives the field picker,
+// the summary table, and what the chart is allowed to plot)
+// ============================================================
+function analyzeHistory() {
+  const stats = new Map();
+  histRows.forEach(r => {
+    const p = r.payload;
+    if (!p || typeof p !== 'object') return;
+    Object.keys(p).forEach(k => {
+      const v = p[k];
+      const isBool = typeof v === 'boolean';
+      if (typeof v !== 'number' && !isBool) return;
+      const num = isBool ? (v ? 1 : 0) : v;
+      let s = stats.get(k);
+      if (!s) { s = { count: 0, min: Infinity, max: -Infinity, sum: 0, last: num, isBoolean: isBool, trueCount: 0 }; stats.set(k, s); }
+      s.count++;
+      s.min = Math.min(s.min, num);
+      s.max = Math.max(s.max, num);
+      s.sum += num;
+      s.last = num;   // rows are ascending by time, so the final write per field is the latest sample
+      if (isBool && v) s.trueCount++;
+    });
+  });
+  fieldStats = stats;
+  discoveredFields = Array.from(stats.keys()).sort();
+  renderFieldCheckboxes();
+  renderFieldStatsTable();
   renderHistoryChart();
+}
+
+function fmtNum(v) {
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+
+function renderFieldCheckboxes() {
+  const el = document.getElementById('hist-fields');
+  if (discoveredFields.length === 0) { el.innerHTML = '<div class="empty">No numeric/boolean fields found in the fetched range</div>'; return; }
+  el.innerHTML = discoveredFields.map(f => `
+    <label class="kv" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" ${selectedFields.has(f) ? 'checked' : ''} onchange="toggleField('${f}', this.checked)"/>
+      <span>${f}</span>
+    </label>`).join('');
+}
+
+function toggleField(field, checked) {
+  if (checked) selectedFields.add(field); else selectedFields.delete(field);
+  renderHistoryChart();
+}
+
+function setAllFieldChecks(on) {
+  discoveredFields.forEach(f => on ? selectedFields.add(f) : selectedFields.delete(f));
+  renderFieldCheckboxes();
+  renderHistoryChart();
+}
+
+function renderFieldStatsTable() {
+  const el = document.getElementById('hist-stats-table');
+  if (discoveredFields.length === 0) { el.innerHTML = '<div class="empty">No data yet</div>'; return; }
+  el.innerHTML = discoveredFields.map(f => {
+    const s = fieldStats.get(f);
+    const summary = s.isBoolean
+      ? `true ${(100 * s.trueCount / s.count).toFixed(0)}% of ${s.count} samples`
+      : `min ${fmtNum(s.min)} · max ${fmtNum(s.max)} · avg ${fmtNum(s.sum / s.count)} · last ${fmtNum(s.last)} (${s.count} samples)`;
+    return `<div class="log-row"><span class="log-topic" style="flex:0 0 160px" title="${f}">${f}</span><span class="log-payload">${summary}</span></div>`;
+  }).join('');
 }
 
 // payload comes back from PostgREST already parsed (the `logs.payload` column
@@ -779,38 +867,88 @@ function renderHistoryTable() {
   }).join('');
 }
 
+const CHART_PALETTE = ['#4a9eff', '#2ecc71', '#f5a623', '#e5484d', '#bb86fc', '#00bcd4', '#ff6fae', '#8bc34a', '#ffb74d', '#90a4ae'];
+const CHART_MAX_POINTS = 2000;   // downsample beyond this so a full day's worth of points stays smooth and readable
+
+// Buckets consecutive points and averages each bucket — keeps the chart
+// legible (and fast) regardless of whether the range holds 200 or 90,000 rows.
+function downsample(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  const bucketSize = Math.ceil(points.length / maxPoints);
+  const out = [];
+  for (let i = 0; i < points.length; i += bucketSize) {
+    const chunk = points.slice(i, i + bucketSize);
+    const avgV = chunk.reduce((sum, p) => sum + p.v, 0) / chunk.length;
+    out.push({ t: chunk[Math.floor(chunk.length / 2)].t, v: avgV });
+  }
+  return out;
+}
+
+function fieldSeries(field) {
+  const pts = [];
+  histRows.forEach(r => {
+    const p = r.payload;
+    if (!p || typeof p !== 'object') return;
+    const v = p[field];
+    if (typeof v === 'number') pts.push({ t: new Date(r.received_at).getTime(), v });
+    else if (typeof v === 'boolean') pts.push({ t: new Date(r.received_at).getTime(), v: v ? 1 : 0 });
+  });
+  return pts;
+}
+
+// Each selected field is drawn against its own min/max (not a shared axis) —
+// fields on wildly different scales (°C vs a fan %, vs a byte count) would
+// otherwise flatten into invisible lines next to each other.
 function renderHistoryChart() {
   const canvas = document.getElementById('hist-chart');
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const points = [];
-  histRows.forEach(r => {
-    const p = r.payload;
-    if (p && typeof p === 'object' && typeof p.stove_temp === 'number') {
-      points.push({ t: new Date(r.received_at).getTime(), v: p.stove_temp });
-    }
-  });
-  if (points.length < 2) {
+  const legend = document.getElementById('hist-legend');
+  const fields = discoveredFields.filter(f => selectedFields.has(f));
+
+  if (histRows.length === 0 || fields.length === 0) {
     ctx.fillStyle = '#8a90a2';
     ctx.font = '12px sans-serif';
-    ctx.fillText('Not enough status/full samples with stove_temp in range', 10, 80);
+    ctx.fillText(histRows.length === 0 ? 'Fetch data first' : 'Check a field above to plot it', 10, 80);
+    legend.innerHTML = '';
     return;
   }
-  const xs = points.map(p => p.t), ys = points.map(p => p.v);
-  const xMin = Math.min(...xs), xMax = Math.max(...xs);
-  const yMin = Math.min(...ys), yMax = Math.max(...ys);
-  const pad = 20, W = canvas.width, H = canvas.height;
+
+  const pad = 24, W = canvas.width, H = canvas.height;
+  let xMin = Infinity, xMax = -Infinity;
+  const series = fields.map((field, idx) => {
+    const pts = downsample(fieldSeries(field), CHART_MAX_POINTS);
+    pts.forEach(p => { if (p.t < xMin) xMin = p.t; if (p.t > xMax) xMax = p.t; });
+    return { field, color: CHART_PALETTE[idx % CHART_PALETTE.length], pts };
+  }).filter(s => s.pts.length >= 2);
+
+  if (series.length === 0) {
+    ctx.fillStyle = '#8a90a2';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Not enough samples for the selected field(s) in this range', 10, 80);
+    legend.innerHTML = '';
+    return;
+  }
+
   const sx = t => pad + (t - xMin) / (xMax - xMin || 1) * (W - 2 * pad);
-  const sy = v => H - pad - (v - yMin) / (yMax - yMin || 1) * (H - 2 * pad);
-  ctx.strokeStyle = '#4a9eff';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  points.forEach((p, i) => { const x = sx(p.t), y = sy(p.v); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
-  ctx.stroke();
-  ctx.fillStyle = '#8a90a2';
-  ctx.font = '11px sans-serif';
-  ctx.fillText(`${yMax.toFixed(0)}°C`, 4, pad);
-  ctx.fillText(`${yMin.toFixed(0)}°C`, 4, H - pad + 4);
+
+  series.forEach(s => {
+    const vs = s.pts.map(p => p.v);
+    const vMin = Math.min(...vs), vMax = Math.max(...vs);
+    const sy = v => H - pad - (v - vMin) / (vMax - vMin || 1) * (H - 2 * pad);
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    s.pts.forEach((p, i) => { const x = sx(p.t), y = sy(p.v); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+    ctx.stroke();
+  });
+
+  legend.innerHTML = series.map(s => {
+    const vs = s.pts.map(p => p.v);
+    const vMin = Math.min(...vs), vMax = Math.max(...vs), vLast = vs[vs.length - 1];
+    return `<div class="kv"><div class="k"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${s.color};margin-right:5px"></span>${s.field}</div>`
+      + `<div class="v">min ${fmtNum(vMin)} · max ${fmtNum(vMax)} · last ${fmtNum(vLast)}</div></div>`;
+  }).join('');
 }
 
 function downloadHistoryCsv() {
@@ -822,6 +960,31 @@ function downloadHistoryCsv() {
   const a = document.createElement('a');
   a.href = url;
   a.download = `woodmood_cloud_history_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function downloadHistoryWideCsv() {
+  if (histRows.length === 0) { alert('Fetch some data first.'); return; }
+  if (discoveredFields.length === 0) { alert('No numeric/boolean fields found to export.'); return; }
+  const lines = ['received_at,topic,' + discoveredFields.map(csvEscape).join(',')];
+  histRows.forEach(r => {
+    const p = r.payload;
+    if (!p || typeof p !== 'object') return;
+    const vals = discoveredFields.map(f => {
+      const v = p[f];
+      if (v === undefined) return '';
+      return typeof v === 'boolean' ? (v ? 1 : 0) : v;
+    });
+    lines.push([r.received_at, csvEscape(r.topic), ...vals].join(','));
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `woodmood_wide_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
