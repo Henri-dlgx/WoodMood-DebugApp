@@ -214,6 +214,35 @@
   </div>
 
   <div class="card">
+    <h2>Timeline</h2>
+    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp and fan speeds overlaid — each scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, and the setpoint (scheduled vs constant) all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
+    <div id="tl-empty" class="empty">Fetch data first — the timeline is built from status/full history.</div>
+    <div id="tl-body" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <span style="font-size:12px;color:var(--dim)">Time window — drag to zoom</span>
+        <span id="tl-winlbl" style="font-size:12px;font-weight:600"></span>
+      </div>
+      <div id="tl-win" style="position:relative;height:20px;background:#0d0f14;border:1px solid var(--border);border-radius:10px;user-select:none;touch-action:none">
+        <div id="tl-sel" style="position:absolute;top:0;bottom:0;background:rgba(74,158,255,.25);border-radius:10px"></div>
+        <div id="tl-hL" style="position:absolute;top:-5px;width:12px;height:30px;border-radius:6px;background:var(--card);border:1px solid var(--blue);cursor:ew-resize;transform:translateX(-50%)"></div>
+        <div id="tl-hR" style="position:absolute;top:-5px;width:12px;height:30px;border-radius:6px;background:var(--card);border:1px solid var(--blue);cursor:ew-resize;transform:translateX(-50%)"></div>
+      </div>
+      <div id="tl-chips" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:12px 0 4px"></div>
+      <div id="tl-wrap" style="position:relative;width:100%">
+        <div id="tl-host"></div>
+        <div id="tl-tt" style="position:absolute;top:0;left:0;display:none;pointer-events:none;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:7px 9px;font-size:11px;line-height:1.55;min-width:150px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:5"></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;font-size:11px;color:var(--dim)">
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px dashed #e5484d"></span>insertion</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px dashed #bb86fc"></span>side switch</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:17px;height:14px;border-radius:7px;border:1px solid #e5484d;color:#e5484d;font-size:9px">40</span>min since last log (per side)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(46,204,113,.5)"></span>setpoint · scheduled</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(138,144,162,.5)"></span>setpoint · constant</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Numeric Fields to Plot</h2>
     <div class="share-row" style="margin-top:0">
       <button class="btn-share" onclick="setAllFieldChecks('numeric', true)">Select all</button>
@@ -830,6 +859,7 @@ function analyzeHistory() {
   renderFieldStatsTable();
   renderHistoryChart();
   renderBinaryChart();
+  renderTimeline();
 }
 
 function fmtNum(v) {
@@ -1123,6 +1153,258 @@ function renderBinaryChart() {
   }).join('');
 
   drawTimeAxis(ctx, xMin, xMax, plotLeft, plotRight, plotTop, plotBottom, 5);
+}
+
+// ============================================================
+// TIMELINE — one shared time axis carrying the overlay chart
+// (temps & fans, each normalised to its own range) plus event/
+// state tracks: per-side log inserts, the active side, and the
+// setpoint with scheduled-vs-constant mode. Built from the same
+// histRows as the other history charts. Everything maps time->x
+// through one scale, so markers, bands and lines always align.
+// ============================================================
+const TL_SERIES = [
+  { key: 'stove_temp',  label: 'stove_temp',  unit: '°C', color: '#f5a623' },
+  { key: 'fan_main',    label: 'fan_main',    unit: '%',       color: '#4a9eff' },
+  { key: 'fan_cooling', label: 'fan_cooling', unit: '%',       color: '#00bcd4' },
+  { key: 'room_temp',   label: 'room_temp',   unit: '°C', color: '#ff6fae' },
+];
+const TL_SIDECOL = {
+  L: { fill: 'rgba(74,158,255,0.20)', tx: '#9cc7ff', name: 'Left'  },
+  R: { fill: 'rgba(245,166,35,0.22)', tx: '#f7c477', name: 'Right' },
+};
+const TL_SPCOL = {
+  sched: { band: 'rgba(46,204,113,0.16)', lvl: 'rgba(46,204,113,0.34)', tx: '#7ee2a8', name: 'scheduled' },
+  fixed: { band: 'rgba(138,144,162,0.14)', lvl: 'rgba(138,144,162,0.30)', tx: '#c2c7d4', name: 'constant'  },
+};
+const TL_INS = '#e5484d', TL_TRANS = '#bb86fc', TL_AXIS = '#8a90a2', TL_GRID = 'rgba(138,144,162,0.15)', TL_SURF = '#0d0f14';
+// viewBox geometry (the SVG scales to the card width)
+const TLX0 = 50, TLW = 900, TLY0 = 12, TLH = 170, TLY1 = 182,
+      TL_LLY = 202, TL_LRY = 224, TL_SY = 240, TL_SH = 24, TL_SPY = 272, TL_SPH = 30, TL_VB = TL_SY + TL_SH;
+
+let tlEnabled = { stove_temp: true, fan_main: true, fan_cooling: true, room_temp: false };
+let tlNorm = true;
+let tlData = null;   // computed model (see tlBuild)
+let tlWin = null;    // current zoom window {a,b} in ms
+let tlWired = false;
+
+function tlSideKey(v) { return String(v).toUpperCase().charAt(0) === 'R' ? 'R' : 'L'; }
+function tlClock(t)   { return new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
+function tlFmt(v)     { return Number.isInteger(v) ? String(v) : v.toFixed(1); }
+
+// Collapse consecutive rows with the same value into [start,end] segments.
+function tlSegments(rows, getter, tEnd) {
+  const segs = [];
+  rows.forEach(fr => {
+    const v = getter(fr);
+    if (v === undefined || v === null || v === '') return;
+    if (segs.length && segs[segs.length - 1].v === v) { segs[segs.length - 1].end = fr.t; return; }
+    if (segs.length) segs[segs.length - 1].end = fr.t;
+    segs.push({ start: fr.t, end: fr.t, v });
+  });
+  if (segs.length) segs[segs.length - 1].end = tEnd;
+  return segs;
+}
+
+function tlBuild() {
+  const fullRows = [];
+  let tMin = Infinity, tMax = -Infinity;
+  histRows.forEach(r => {
+    const p = r.payload;
+    if (!p || typeof p !== 'object') return;
+    if (p.stove_temp === undefined && p.setpoint === undefined && p.system_state === undefined) return;
+    const t = new Date(r.received_at).getTime();
+    fullRows.push({ t, p });
+    if (t < tMin) tMin = t;
+    if (t > tMax) tMax = t;
+  });
+  if (fullRows.length < 2) return null;
+  fullRows.sort((a, b) => a.t - b.t);
+
+  // numeric series — min/max from raw samples, points downsampled for drawing
+  const series = {};
+  TL_SERIES.forEach(s => {
+    const raw = []; let mn = Infinity, mx = -Infinity;
+    fullRows.forEach(fr => {
+      const v = fr.p[s.key];
+      if (typeof v !== 'number') return;
+      if (s.key === 'room_temp' && v <= -100) return; // -999 = BLE room sensor unavailable
+      raw.push({ t: fr.t, v });
+      if (v < mn) mn = v; if (v > mx) mx = v;
+    });
+    series[s.key] = { pts: downsample(raw, 1500), min: mn, max: mx };
+  });
+
+  // insertion events — reconstruct the true insert time from last_insert_ago_sec,
+  // then dedupe the cluster of rows that all point back to the same insert.
+  const raw = [];
+  fullRows.forEach(fr => {
+    const p = fr.p;
+    if (p.last_insert_ever === false) return;
+    if (typeof p.last_insert_ago_sec !== 'number') return;
+    raw.push({ t: fr.t - p.last_insert_ago_sec * 1000, side: tlSideKey(p.last_insert_side || 'L') });
+  });
+  raw.sort((a, b) => a.t - b.t);
+  const events = [];
+  raw.forEach(e => { if (events.length && Math.abs(events[events.length - 1].t - e.t) < 20000) return; events.push(e); });
+
+  // active side (last_insert_side) and setpoint+mode as step segments
+  const sideSeg = tlSegments(fullRows, fr => fr.p.last_insert_side ? tlSideKey(fr.p.last_insert_side) : undefined, tMax);
+  const spSeg = tlSegments(fullRows, fr => {
+    if (typeof fr.p.setpoint !== 'number') return undefined;
+    return fr.p.setpoint + '|' + (fr.p.sched_enabled ? 'sched' : 'fixed');
+  }, tMax);
+  let spMin = Infinity, spMax = -Infinity;
+  spSeg.forEach(g => { const parts = String(g.v).split('|'); g.sp = parseFloat(parts[0]); g.mode = parts[1]; if (g.sp < spMin) spMin = g.sp; if (g.sp > spMax) spMax = g.sp; });
+  if (!isFinite(spMin)) { spMin = 0; spMax = 1; }
+  const pad = Math.max(5, (spMax - spMin) * 0.15);
+
+  return { tMin, tMax, series, events, sideSeg, spSeg, spMin: spMin - pad, spMax: spMax + pad, fullRows };
+}
+
+function tlGlobalMax() {
+  let mx = 1;
+  TL_SERIES.forEach(s => { if (tlEnabled[s.key] && tlData.series[s.key] && isFinite(tlData.series[s.key].max)) mx = Math.max(mx, tlData.series[s.key].max); });
+  return mx;
+}
+
+function tlNearestVal(key, t) {
+  const ser = tlData.series[key];
+  if (!ser || !ser.pts.length) return null;
+  let near = null, best = Infinity;
+  for (const p of ser.pts) { const d = Math.abs(p.t - t); if (d < best) { best = d; near = p; } }
+  return near ? near.v : null;
+}
+function tlSegAt(segs, t) { for (const g of segs) { if (t >= g.start && t <= g.end) return g; } return segs.length ? segs[segs.length - 1] : null; }
+
+function renderTimeline() {
+  const emptyEl = document.getElementById('tl-empty');
+  const bodyEl = document.getElementById('tl-body');
+  tlData = tlBuild();
+  if (!tlData) {
+    bodyEl.style.display = 'none';
+    emptyEl.style.display = '';
+    emptyEl.textContent = histRows.length
+      ? 'No status/full rows in this result — clear the Topic filter (or set it to …/status/full) and Fetch again.'
+      : 'Fetch data first — the timeline is built from status/full history.';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  bodyEl.style.display = '';
+  tlWin = { a: tlData.tMin, b: tlData.tMax };
+  tlRenderChips();
+  tlSyncWin();
+  tlDraw();
+  tlWireOnce();
+}
+
+function tlRenderChips() {
+  const el = document.getElementById('tl-chips');
+  let h = TL_SERIES.map(s => {
+    const on = tlEnabled[s.key];
+    return `<button data-k="${s.key}" style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer;background:${on ? '#0d0f14' : 'transparent'};border:1px solid ${on ? s.color : 'var(--border)'};color:${on ? 'var(--text)' : 'var(--dim)'}"><span style="width:9px;height:9px;border-radius:2px;background:${on ? s.color : '#3a3f4b'}"></span>${s.label}</button>`;
+  }).join('');
+  h += `<button id="tl-normb" style="margin-left:auto;padding:5px 10px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer;background:${tlNorm ? 'rgba(74,158,255,.15)' : 'transparent'};border:1px solid ${tlNorm ? 'var(--blue)' : 'var(--border)'};color:${tlNorm ? 'var(--blue)' : 'var(--dim)'}">scale each to its own range</button>`;
+  el.innerHTML = h;
+  el.querySelectorAll('button[data-k]').forEach(b => b.onclick = () => { tlEnabled[b.dataset.k] = !tlEnabled[b.dataset.k]; tlRenderChips(); tlDraw(); });
+  document.getElementById('tl-normb').onclick = () => { tlNorm = !tlNorm; tlRenderChips(); tlDraw(); };
+}
+
+function tlDraw() {
+  const host = document.getElementById('tl-host');
+  const a = tlWin.a, b = tlWin.b, span = (b - a) || 1;
+  const xF = t => TLX0 + (t - a) / span * TLW;
+  const inW = t => t >= a - 1 && t <= b + 1;
+  const gmax = tlGlobalMax();
+  const yF = (s, v) => { let f; if (tlNorm) { const r = tlData.series[s.key]; f = (v - r.min) / ((r.max - r.min) || 1); } else { f = v / gmax; } return TLY1 - Math.max(-0.04, Math.min(1.04, f)) * TLH; };
+  const p = [];
+  p.push(`<svg viewBox="0 0 960 312" width="100%" style="display:block">`);
+  p.push(`<defs><clipPath id="tlpc"><rect x="${TLX0}" y="${TLY0}" width="${TLW}" height="${TLH}"/></clipPath></defs>`);
+  [0, .25, .5, .75, 1].forEach(f => { const y = TLY1 - f * TLH; p.push(`<line x1="${TLX0}" y1="${y}" x2="${TLX0 + TLW}" y2="${y}" stroke="${TL_GRID}"/>`); p.push(`<text x="${TLX0 - 7}" y="${y + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${tlNorm ? Math.round(f * 100) + '%' : Math.round(f * gmax)}</text>`); });
+  const ticks = 6;
+  for (let i = 0; i <= ticks; i++) { const t = a + span * i / ticks, x = TLX0 + TLW * i / ticks; p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TLY1}" stroke="${TL_GRID}"/>`); p.push(`<text x="${x}" y="${TLY1 + 12}" text-anchor="${i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}" font-size="10" fill="${TL_AXIS}">${tlClock(t)}</text>`); }
+  tlData.sideSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), col = TL_SIDECOL[g.v]; p.push(`<rect x="${xa}" y="${TL_SY}" width="${xb - xa}" height="${TL_SH}" fill="${col.fill}"/>`); if (xb - xa > 46) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SY + TL_SH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
+  tlData.spSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = TL_SPCOL[g.mode] || TL_SPCOL.fixed; p.push(`<rect x="${xa}" y="${TL_SPY}" width="${w}" height="${TL_SPH}" fill="${col.band}"/>`); const frac = Math.max(0, Math.min(1, (g.sp - tlData.spMin) / ((tlData.spMax - tlData.spMin) || 1))), lh = frac * TL_SPH; p.push(`<rect x="${xa}" y="${TL_SPY + TL_SPH - lh}" width="${w}" height="${lh}" fill="${col.lvl}"/>`); if (w > 26) { p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 14}" text-anchor="middle" font-size="12" fill="${col.tx}">${Math.round(g.sp)}°</text>`); if (w > 66) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 26}" text-anchor="middle" font-size="9" fill="${col.tx}">${col.name}</text>`); } });
+  tlData.spSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TL_SPY - 3}" x2="${x}" y2="${TL_SPY + TL_SPH + 3}" stroke="${TL_AXIS}" stroke-dasharray="1 3"/>`); });
+  [['log_l', TL_LLY], ['log_r', TL_LRY], ['side', TL_SY + TL_SH / 2], ['setpoint', TL_SPY + TL_SPH / 2]].forEach(l => p.push(`<text x="${TLX0 - 7}" y="${l[1] + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${l[0]}</text>`));
+  TL_SERIES.forEach(s => { if (!tlEnabled[s.key]) return; const ser = tlData.series[s.key]; if (!ser || ser.pts.length < 2) return; const pts = ser.pts.map(o => xF(o.t) + ',' + yF(s, o.v)).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#tlpc)"/>`); });
+  tlData.sideSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_VB}" stroke="${TL_TRANS}" stroke-width="1.5" stroke-dasharray="2 3"/>`); });
+  tlData.events.forEach(ev => { if (!inW(ev.t)) return; const x = xF(ev.t); p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_VB}" stroke="${TL_INS}" stroke-width="1.5" stroke-dasharray="4 3"/>`); const ly = ev.side === 'R' ? TL_LRY : TL_LLY; p.push(`<rect x="${x - 3}" y="${ly - 6}" width="6" height="12" rx="1.5" fill="${TL_INS}"/>`); });
+  ['L', 'R'].forEach(side => { const evs = tlData.events.filter(e => e.side === side); for (let i = 1; i < evs.length; i++) { const e0 = evs[i - 1], e1 = evs[i]; if (!inW(e0.t) || !inW(e1.t)) continue; const mid = (e0.t + e1.t) / 2; if (!inW(mid)) continue; const x = xF(mid), ly = side === 'R' ? TL_LRY : TL_LLY, gap = Math.round((e1.t - e0.t) / 60000), w = String(gap).length * 7 + 14; p.push(`<rect x="${x - w / 2}" y="${ly - 8}" width="${w}" height="16" rx="8" fill="${TL_SURF}" stroke="${TL_INS}"/>`); p.push(`<text x="${x}" y="${ly + 3.5}" text-anchor="middle" font-size="10" fill="${TL_INS}">${gap}</text>`); } });
+  p.push(`<line id="tl-xh" x1="0" y1="${TLY0}" x2="0" y2="${TLY1}" stroke="${TL_AXIS}" stroke-dasharray="3 3" style="display:none"/>`);
+  p.push(`<g id="tl-xdots"></g>`);
+  p.push(`</svg>`);
+  host.innerHTML = p.join('');
+}
+
+function tlHideTT() {
+  const tt = document.getElementById('tl-tt'); if (tt) tt.style.display = 'none';
+  const host = document.getElementById('tl-host'); if (!host) return;
+  const xh = host.querySelector('#tl-xh'); if (xh) xh.style.display = 'none';
+  const xd = host.querySelector('#tl-xdots'); if (xd) xd.innerHTML = '';
+}
+
+function tlSyncWin() {
+  const sel = document.getElementById('tl-sel'), hL = document.getElementById('tl-hL'), hR = document.getElementById('tl-hR');
+  const full = (tlData.tMax - tlData.tMin) || 1;
+  const l = (tlWin.a - tlData.tMin) / full * 100, r = (tlWin.b - tlData.tMin) / full * 100;
+  sel.style.left = l + '%'; sel.style.width = (r - l) + '%'; hL.style.left = l + '%'; hR.style.left = r + '%';
+  document.getElementById('tl-winlbl').textContent = `${tlClock(tlWin.a)} → ${tlClock(tlWin.b)}`;
+}
+
+// Listeners bound once to elements that persist across redraws — the drag
+// handles and the host container (host innerHTML is rebuilt each tlDraw, so
+// the crosshair listener lives on the container, not the SVG).
+function tlWireOnce() {
+  if (tlWired) return; tlWired = true;
+  const host = document.getElementById('tl-host');
+  const win = document.getElementById('tl-win');
+  const hL = document.getElementById('tl-hL'), hR = document.getElementById('tl-hR');
+  let drag = null;
+  const pctOf = cx => { const rc = win.getBoundingClientRect(); return Math.max(0, Math.min(1, (cx - rc.left) / rc.width)); };
+  hL.onpointerdown = e => { drag = 'L'; hL.setPointerCapture(e.pointerId); };
+  hR.onpointerdown = e => { drag = 'R'; hR.setPointerCapture(e.pointerId); };
+  window.addEventListener('pointermove', e => {
+    if (!drag || !tlData) return;
+    const full = (tlData.tMax - tlData.tMin) || 1, t = tlData.tMin + pctOf(e.clientX) * full, minGap = full * 0.02;
+    if (drag === 'L') tlWin.a = Math.min(t, tlWin.b - minGap); else tlWin.b = Math.max(t, tlWin.a + minGap);
+    tlWin.a = Math.max(tlData.tMin, tlWin.a); tlWin.b = Math.min(tlData.tMax, tlWin.b);
+    tlSyncWin(); tlDraw();
+  });
+  window.addEventListener('pointerup', () => { drag = null; });
+  host.addEventListener('pointermove', e => {
+    if (!tlData) return;
+    const svg = host.querySelector('svg'); if (!svg) return;
+    const rc = svg.getBoundingClientRect(), vbx = (e.clientX - rc.left) / rc.width * 960;
+    if (vbx < TLX0 || vbx > TLX0 + TLW) { tlHideTT(); return; }
+    const a = tlWin.a, b = tlWin.b, t = a + (vbx - TLX0) / TLW * (b - a);
+    let near = tlData.fullRows[0];
+    for (const fr of tlData.fullRows) { if (Math.abs(fr.t - t) < Math.abs(near.t - t)) near = fr; }
+    const sx = TLX0 + (near.t - a) / ((b - a) || 1) * TLW;
+    const xh = host.querySelector('#tl-xh'); xh.setAttribute('x1', sx); xh.setAttribute('x2', sx); xh.style.display = '';
+    const gmax = tlGlobalMax();
+    const yF = (s, v) => { let f; if (tlNorm) { const r = tlData.series[s.key]; f = (v - r.min) / ((r.max - r.min) || 1); } else { f = v / gmax; } return TLY1 - Math.max(-0.04, Math.min(1.04, f)) * TLH; };
+    let dots = '', rows = '';
+    TL_SERIES.forEach(s => {
+      if (!tlEnabled[s.key]) return;
+      const v = tlNearestVal(s.key, near.t); if (v === null) return;
+      dots += `<circle cx="${sx}" cy="${yF(s, v)}" r="3.5" fill="${s.color}" stroke="${TL_SURF}" stroke-width="1.5"/>`;
+      rows += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.color};margin-right:5px"></span>${s.label}</span><span style="font-weight:600">${tlFmt(v)}${s.unit}</span></div>`;
+    });
+    host.querySelector('#tl-xdots').innerHTML = dots;
+    const sp = tlSegAt(tlData.spSeg, near.t), sd = tlSegAt(tlData.sideSeg, near.t);
+    let meta = '';
+    if (sp) meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">setpoint</span><span style="font-weight:600">${Math.round(sp.sp)}° · ${(TL_SPCOL[sp.mode] || TL_SPCOL.fixed).name}</span></div>`;
+    if (sd) meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">side</span><span style="font-weight:600">${TL_SIDECOL[sd.v].name}</span></div>`;
+    const evN = tlData.events.filter(ev => Math.abs(ev.t - near.t) <= 20000)[0];
+    const note = evN ? `<div style="margin-top:4px;color:${TL_INS}">insertion · ${TL_SIDECOL[evN.side].name.toLowerCase()}</div>` : '';
+    const tt = document.getElementById('tl-tt');
+    tt.innerHTML = `<div style="font-weight:600;margin-bottom:4px">${new Date(near.t).toLocaleTimeString()}</div>${rows}<div style="border-top:1px solid var(--border);margin:5px 0 4px"></div>${meta}${note}`;
+    tt.style.display = '';
+    const pxX = sx / 960 * rc.width;
+    tt.style.left = Math.min(pxX + 12, rc.width - 170) + 'px'; tt.style.top = '6px';
+  });
+  host.addEventListener('pointerleave', tlHideTT);
 }
 
 function downloadHistoryCsv() {
