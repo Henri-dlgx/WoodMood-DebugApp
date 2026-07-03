@@ -240,7 +240,7 @@
 
   <div class="card">
     <h2>Binary / State Timeline</h2>
-    <div class="share-note" style="margin-top:0;margin-bottom:8px">Each field gets its own lane. Filled = on/true, faint = off/false — partial fill within a bucket means it toggled during that stretch.</div>
+    <div class="share-note" style="margin-top:0;margin-bottom:8px">Each field gets its own lane, drawn as a step waveform — high = on/true, low = off/false, with a vertical jump at every transition.</div>
     <canvas id="hist-chart-binary" width="960" height="200" style="width:100%;height:200px;display:block"></canvas>
     <div class="grid" id="hist-legend-binary" style="margin-top:10px"></div>
   </div>
@@ -923,9 +923,58 @@ function fieldSeries(field) {
   return pts;
 }
 
+// Collapses a raw 0/1 series down to just its transition points, so drawing
+// it as connected line segments traces an exact Heaviside/step waveform
+// (flat-then-jump) instead of interpolating a slope between samples.
+function toSteps(points) {
+  if (points.length === 0) return [];
+  let prevV = points[0].v;
+  const steps = [{ t: points[0].t, v: prevV }];
+  for (let i = 1; i < points.length; i++) {
+    if (points[i].v !== prevV) {
+      steps.push({ t: points[i].t, v: prevV });
+      steps.push({ t: points[i].t, v: points[i].v });
+      prevV = points[i].v;
+    }
+  }
+  steps.push({ t: points[points.length - 1].t, v: prevV });
+  return steps;
+}
+
+function formatAxisTime(t, spanMs) {
+  const d = new Date(t);
+  if (spanMs > 36 * 3600 * 1000) return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+// Shared bottom axis: vertical gridlines spanning the plot area, tick labels
+// formatted for the visible time range, and a "Time" title.
+function drawTimeAxis(ctx, xMin, xMax, plotLeft, plotRight, plotTop, plotBottom, ticksCount) {
+  const span = xMax - xMin || 1;
+  ctx.font = '10px sans-serif';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= ticksCount; i++) {
+    const t = xMin + span * i / ticksCount;
+    const x = plotLeft + (plotRight - plotLeft) * i / ticksCount;
+    ctx.strokeStyle = 'rgba(138,144,162,0.15)';
+    ctx.beginPath();
+    ctx.moveTo(x, plotTop);
+    ctx.lineTo(x, plotBottom);
+    ctx.stroke();
+    ctx.fillStyle = '#8a90a2';
+    ctx.textAlign = i === 0 ? 'left' : (i === ticksCount ? 'right' : 'center');
+    ctx.fillText(formatAxisTime(t, span), x, plotBottom + 13);
+  }
+  ctx.textAlign = 'center';
+  ctx.fillText('Time', (plotLeft + plotRight) / 2, plotBottom + 26);
+  ctx.textAlign = 'left';
+}
+
 // Each selected field is drawn against its own min/max (not a shared axis) —
 // fields on wildly different scales (°C vs a fan %, vs a byte count) would
-// otherwise flatten into invisible lines next to each other.
+// otherwise flatten into invisible lines next to each other. The Y gridlines
+// and labels are scaled to the first selected field; the legend still shows
+// each field's own min/max/last for the others.
 function renderHistoryChart() {
   const canvas = document.getElementById('hist-chart');
   const ctx = canvas.getContext('2d');
@@ -941,7 +990,8 @@ function renderHistoryChart() {
     return;
   }
 
-  const pad = 24, W = canvas.width, H = canvas.height;
+  const W = canvas.width, H = canvas.height;
+  const plotLeft = 46, plotRight = W - 10, plotTop = 10, plotBottom = H - 34;
   let xMin = Infinity, xMax = -Infinity;
   const series = fields.map((field, idx) => {
     const pts = downsample(fieldSeries(field), CHART_MAX_POINTS);
@@ -957,12 +1007,33 @@ function renderHistoryChart() {
     return;
   }
 
-  const sx = t => pad + (t - xMin) / (xMax - xMin || 1) * (W - 2 * pad);
+  const sx = t => plotLeft + (t - xMin) / (xMax - xMin || 1) * (plotRight - plotLeft);
+
+  const axisVs = series[0].pts.map(p => p.v);
+  const axisMin = Math.min(...axisVs), axisMax = Math.max(...axisVs);
+  const yTicks = 4;
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i <= yTicks; i++) {
+    const v = axisMin + (axisMax - axisMin) * i / yTicks;
+    const y = plotBottom - (plotBottom - plotTop) * i / yTicks;
+    ctx.strokeStyle = 'rgba(138,144,162,0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotRight, y);
+    ctx.stroke();
+    ctx.fillStyle = '#8a90a2';
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtNum(v), plotLeft - 6, y + 3);
+  }
+  ctx.textAlign = 'left';
+
+  drawTimeAxis(ctx, xMin, xMax, plotLeft, plotRight, plotTop, plotBottom, 5);
 
   series.forEach(s => {
     const vs = s.pts.map(p => p.v);
     const vMin = Math.min(...vs), vMax = Math.max(...vs);
-    const sy = v => H - pad - (v - vMin) / (vMax - vMin || 1) * (H - 2 * pad);
+    const sy = v => plotBottom - (v - vMin) / (vMax - vMin || 1) * (plotBottom - plotTop);
     ctx.strokeStyle = s.color;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -978,11 +1049,10 @@ function renderHistoryChart() {
   }).join('');
 }
 
-// Each selected boolean field gets its own horizontal lane instead of an
-// overlapping 0/1 step line — much easier to scan for "when was this open/on."
-// Downsampled buckets average true/false into a 0..1 duty cycle, drawn as
-// fill opacity, so a lane that toggled rapidly within a bucket still reads
-// as "partially on" rather than aliasing to a misleading solid on/off block.
+// Each selected boolean field gets its own horizontal lane, drawn as an exact
+// Heaviside/step waveform (flat at 0 or 1, vertical jump at each transition)
+// rather than a duty-cycle shaded block — so "on" and "off" are unambiguous
+// at any zoom level instead of reading as a fuzzy intensity.
 function renderBinaryChart() {
   const canvas = document.getElementById('hist-chart-binary');
   const ctx = canvas.getContext('2d');
@@ -998,40 +1068,61 @@ function renderBinaryChart() {
     return;
   }
 
-  const pad = 4, labelW = 90, W = canvas.width, H = canvas.height;
+  const W = canvas.width, H = canvas.height;
+  const labelW = 90, plotLeft = labelW, plotRight = W - 6, plotTop = 4, plotBottom = H - 30;
   let xMin = Infinity, xMax = -Infinity;
   histRows.forEach(r => {
     const t = new Date(r.received_at).getTime();
     if (t < xMin) xMin = t;
     if (t > xMax) xMax = t;
   });
-  const sx = t => labelW + (t - xMin) / (xMax - xMin || 1) * (W - labelW - pad);
-  const laneH = (H - pad) / fields.length;
+  const sx = t => plotLeft + (t - xMin) / (xMax - xMin || 1) * (plotRight - plotLeft);
+  const laneH = (plotBottom - plotTop) / fields.length;
 
   legend.innerHTML = fields.map((field, idx) => {
     const color = CHART_PALETTE[idx % CHART_PALETTE.length];
-    const pts = downsample(fieldSeries(field), CHART_MAX_POINTS);
-    const laneTop = idx * laneH;
-    const barTop = laneTop + 3, barBottom = laneTop + laneH - 5;
+    const raw = fieldSeries(field);
+    const laneTop = plotTop + idx * laneH;
+    const barTop = laneTop + 4, barBottom = laneTop + laneH - 6;
+    const yFor = v => barBottom - v * (barBottom - barTop);
+
+    ctx.strokeStyle = 'rgba(138,144,162,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(plotLeft, barBottom); ctx.lineTo(plotRight, barBottom); ctx.stroke();
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(plotLeft, barTop); ctx.lineTo(plotRight, barTop); ctx.stroke();
+    ctx.setLineDash([]);
 
     ctx.fillStyle = '#8a90a2';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('1', plotLeft - 6, barTop + 3);
+    ctx.fillText('0', plotLeft - 6, barBottom + 3);
+
     ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
     ctx.fillText(field, 2, laneTop + laneH / 2 + 4);
 
-    for (let i = 0; i < pts.length; i++) {
-      const xStart = sx(pts[i].t);
-      const xEnd = i < pts.length - 1 ? sx(pts[i + 1].t) : W - pad;
-      ctx.fillStyle = color;
-      ctx.globalAlpha = pts[i].v <= 0 ? 0.08 : (0.25 + 0.65 * pts[i].v);
-      ctx.fillRect(xStart, barTop, Math.max(1, xEnd - xStart), barBottom - barTop);
+    if (raw.length > 0) {
+      const steps = toSteps(raw);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      steps.forEach((p, i) => {
+        const x = sx(p.t), y = yFor(p.v);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.lineTo(plotRight, yFor(steps[steps.length - 1].v));
+      ctx.stroke();
     }
-    ctx.globalAlpha = 1;
 
     const s = fieldStats.get(field);
     const pct = (100 * s.trueCount / s.count).toFixed(0);
     return `<div class="kv"><div class="k"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:5px"></span>${field}</div>`
       + `<div class="v">true ${pct}% of samples</div></div>`;
   }).join('');
+
+  drawTimeAxis(ctx, xMin, xMax, plotLeft, plotRight, plotTop, plotBottom, 5);
 }
 
 function downloadHistoryCsv() {
