@@ -205,7 +205,7 @@
       <input id="hist-hours" type="number" min="0.5" step="0.5" value="24" style="width:70px"/>
       <label class="export-label">hours</label>
       <label class="export-label">Topic</label>
-      <input id="hist-topic" placeholder="blank = all topics" style="width:240px"/>
+      <input id="hist-topic" placeholder="blank = the connected stove only" style="width:240px"/>
       <button class="btn-share" onclick="fetchHistory()">Fetch</button>
       <button class="btn-share" onclick="downloadHistoryCsv()">Download raw CSV</button>
       <button class="btn-share" onclick="downloadHistoryWideCsv()">Download wide CSV (spreadsheet-ready)</button>
@@ -616,12 +616,14 @@ function renderTemp() {
     kv('Main fan', (full.fan_main ?? '—') + '%') +
     kv('Cooling fan', (full.fan_cooling ?? '—') + '%') +
     boolKv('Auto setpoint', full.auto_setpoint) +
-    boolKv('Eco mode', full.eco_mode) +
-    kv('Eco floor', (full.eco_floor ?? '—') + '%') +
-    kv('Normal floor', (full.norm_floor ?? '—') + '%') +
-    boolKv('Max-temp protection', full.max_temp_prot) +
-    kv('Max-temp threshold', (full.max_temp_val ?? '—') + '°C') +
-    boolKv('Beeper enabled', full.beeper);
+    boolKv('Beeper enabled', full.beeper) +
+    // Eco mode/floor and max-temp protection/threshold were dropped from
+    // status/full (buffer-space trim, Jul 2026) — the underlying settings and
+    // their MQTT setters (cmd/eco_mode, cmd/max_temp, etc.) are unchanged, just
+    // no longer echoed live. Still visible in "All Fields" if a build restores
+    // them; see full raw dump below.
+    kv('Chip temp (die)', (full.chip_temp ?? '—') + '°C') +
+    boolKv('Chip temp warning (>80°C)', full.chip_temp_warn, true);
 }
 
 function renderSystem() {
@@ -780,7 +782,9 @@ function fillSupabaseForm() {
   document.getElementById('supa-url').value = supaCfg.url || '';
   document.getElementById('supa-key').value = supaCfg.key || '';
   const topicEl = document.getElementById('hist-topic');
-  if (cfg.serial) topicEl.placeholder = `blank = all topics, e.g. WoodMood${cfg.serial}/status/full`;
+  topicEl.placeholder = cfg.serial
+    ? `blank = ${cfg.serial} only, or set an exact topic e.g. WoodMood${cfg.serial}/status/full`
+    : 'blank = all topics (connect to a stove to default to just that one)';
 }
 
 function saveSupabaseConfig() {
@@ -802,16 +806,33 @@ async function fetchHistory() {
   const info = document.getElementById('hist-info');
   const hours = parseFloat(document.getElementById('hist-hours').value) || 24;
   const topic = document.getElementById('hist-topic').value.trim();
-  const since = new Date(Date.now() - hours * 3600000).toISOString();
+  let filter = '';
+  if (topic) filter = `&topic=eq.${encodeURIComponent(topic)}`;
+  else if (cfg.serial) filter = `&device=eq.${encodeURIComponent(cfg.serial)}`;
+  const headers = { apikey: supaCfg.key, Authorization: `Bearer ${supaCfg.key}` };
   const rows = [];
+  let latest = null;
   let offset = 0;
   try {
+    // Anchor the window to the newest row present, not wall-clock now, so the
+    // last hours of *activity* stay visible even after days with the stove off.
+    info.textContent = 'Loading…';
+    const latestRes = await fetch(`${supaCfg.url}/rest/v1/logs?select=received_at&order=received_at.desc&limit=1${filter}`, { headers });
+    if (!latestRes.ok) throw new Error(`HTTP ${latestRes.status}`);
+    latest = (await latestRes.json())[0]?.received_at;
+    if (!latest) {
+      histRows = [];
+      info.textContent = 'No rows found in the database' + (topic ? ` for ${topic}` : cfg.serial ? ` for device ${cfg.serial}` : '') + '.';
+      renderHistoryTable();
+      analyzeHistory();
+      return;
+    }
+    const since = new Date(new Date(latest).getTime() - hours * 3600000).toISOString();
     while (true) {
       info.textContent = `Loading… (${rows.length} rows so far)`;
-      let q = `${supaCfg.url}/rest/v1/logs?select=topic,payload,received_at&received_at=gte.${encodeURIComponent(since)}`
-        + `&order=received_at.asc&limit=${HIST_PAGE_SIZE}&offset=${offset}`;
-      if (topic) q += `&topic=eq.${encodeURIComponent(topic)}`;
-      const res = await fetch(q, { headers: { apikey: supaCfg.key, Authorization: `Bearer ${supaCfg.key}` } });
+      const q = `${supaCfg.url}/rest/v1/logs?select=topic,payload,received_at&received_at=gte.${encodeURIComponent(since)}`
+        + `&order=received_at.asc&limit=${HIST_PAGE_SIZE}&offset=${offset}` + filter;
+      const res = await fetch(q, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const page = await res.json();
       rows.push(...page);
@@ -824,7 +845,9 @@ async function fetchHistory() {
   }
   histRows = rows;
   const capped = rows.length >= HIST_MAX_ROWS ? ` — capped at ${HIST_MAX_ROWS}, narrow the range/topic for a complete set` : '';
-  info.textContent = `${histRows.length} rows over the last ${hours}h` + (topic ? ` for ${topic}` : '') + capped;
+  const staleNote = (Date.now() - new Date(latest).getTime() > 3600000)
+    ? ` (last activity: ${new Date(latest).toLocaleString()})` : '';
+  info.textContent = `${histRows.length} rows over the last ${hours}h of activity${staleNote}` + (topic ? ` for ${topic}` : '') + capped;
   renderHistoryTable();
   analyzeHistory();
 }
