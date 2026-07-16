@@ -39,6 +39,11 @@ FROM
   "WoodMoodJJQF9D/status/full", "WoodMoodJJQF9D/status/diag", "WoodMoodJJQF9D/status/stats"
 ```
 
+> ⚠️ **This `FROM` does not include `status/crash`** (added in firmware v5.2). Crash
+> reports reach the app's live Crash panel over MQTT regardless — that panel reads the
+> retained topic directly — but they will **not** be archived to Supabase, so crash
+> History stays empty until the topic is added below.
+
 How `device` is built:
 - `tokens(topic, '/')` → `["WoodMoodJJQF9D", "status", "full"]`
 - `nth(1, …)` → `"WoodMoodJJQF9D"`  *(EMQX arrays are 1-based)*
@@ -55,13 +60,31 @@ SELECT
   payload,
   substr(nth(1, tokens(topic, '/')), 9) as device
 FROM
-  "+/status/full", "+/status/diag", "+/status/stats"
+  "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash"
 ```
 
 `+` matches any single topic level, so `+/status/full` matches
 `WoodMood<ANYSERIAL>/status/full`. The `device` expression already strips the
 `WoodMood` prefix, so each stove lands under its own serial with no per-stove
 edits.
+
+**Paste this SQL, hit *SQL Test*, then Save.** After saving, check *Statistics* —
+`Passed` should track `Matched`. See Troubleshooting below if it doesn't.
+
+#### About `status/crash` specifically
+
+Unlike `status/full` (1 Hz), `status/crash` is published **once per boot** and is
+**retained**. That matters for reading the numbers:
+
+- Expect roughly **one row per stove reboot**, not a steady stream. A quiet `logs`
+  table for this topic is the healthy case — it means nothing is rebooting.
+- A **run of rows in quick succession is a reboot loop** — exactly the signal you want.
+  That's why the firmware publishes once per boot rather than once per MQTT connect:
+  a flaky link would otherwise manufacture fake "crashes" out of reconnects.
+- Retained means the **live** Crash panel works even for a stove that crashed weeks
+  ago and hasn't republished. The Supabase rows are the *history*; the retained topic
+  is the *current state*. They answer different questions — keep both.
+- Payload with no `last` key = that stove has never crashed. `n` is the lifetime count.
 
 > Note: MQTT wildcards match a **whole level** — you cannot write `WoodMood+`.
 > Use `+/status/...`. This broker only carries `WoodMood…` topics, so a bare `+`

@@ -62,6 +62,17 @@
   .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media (max-width:800px){.two-col{grid-template-columns:1fr}}
 
+  /* crash report */
+  .bt{background:#0a0c10;border-radius:6px;padding:10px;margin-top:10px;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+      color:var(--text);overflow-x:auto;white-space:pre;line-height:1.6}
+  .bt .frame-n{color:var(--dim)}
+  .bt .frame-pc{color:var(--amber)}
+  .crash-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
+  .crash-hint{font-size:11px;color:var(--dim);margin-top:8px;line-height:1.5}
+  .crash-hint code{background:#0a0c10;padding:1px 5px;border-radius:3px;
+                   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+
   .log{background:#0a0c10;border-radius:6px;height:340px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;padding:8px}
   .log-row{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid #191c22}
   .log-time{color:var(--dim);flex:0 0 64px}
@@ -154,6 +165,14 @@
       <h2>Network &amp; Firmware</h2>
       <div class="grid" id="net-grid"><div class="empty">No data yet</div></div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Crash Report</h2>
+    <div id="crash-banner" class="banner none">Waiting for status/crash…</div>
+    <div class="grid" id="crash-grid"></div>
+    <div id="crash-bt"></div>
+    <div id="crash-actions"></div>
   </div>
 
   <div class="card">
@@ -324,6 +343,9 @@ let prefix = '';
 let msgCount = 0;
 let full = {};   // parsed status/full
 let stats = {};  // parsed status/stats
+let crash = null;    // parsed status/crash
+let crashRaw = '';   // raw JSON, kept verbatim for the decode-command clipboard action
+let crashWaitTimer = null;  // distinguishes "not reported yet" from "firmware too old"
 let lastInsertBaseSec = null;  // last_insert_ago_sec as of the most recent status/full
 let lastInsertBaseAt  = null;  // Date.now() when that value was received
 let extra = {};  // other individual topics: online, firmware, ntfy_link, diag, fault_msg
@@ -477,6 +499,22 @@ function connect() {
     document.getElementById('conn-btn').textContent = 'Disconnect';
     document.getElementById('conn-btn').classList.add('disconnect');
     client.subscribe(prefix + '/#');
+
+    // Drop the previous stove's crash state — otherwise connecting to a second
+    // stove would keep showing the first one's crash, which is worse than useless.
+    crash = null; crashRaw = '';
+    document.getElementById('crash-banner').className = 'banner none';
+    document.getElementById('crash-banner').textContent = 'Waiting for status/crash…';
+    document.getElementById('crash-grid').innerHTML = '';
+    document.getElementById('crash-bt').innerHTML = '';
+    document.getElementById('crash-actions').innerHTML = '';
+
+    // status/crash is retained, so if the stove ever published it the broker
+    // delivers it immediately on subscribe. If it hasn't landed shortly after
+    // connecting, this firmware predates v5.2 and simply doesn't report crashes —
+    // say that plainly instead of sitting on "Waiting…" forever.
+    clearTimeout(crashWaitTimer);
+    crashWaitTimer = setTimeout(() => { if (!crash) renderCrashUnsupported(); }, 5000);
   });
 
   client.on('message', onMessage);
@@ -515,6 +553,12 @@ function onMessage(topic, payloadBuf) {
   }
   if (sub === 'status/stats') {
     try { stats = JSON.parse(payload); renderStats(); } catch(e) {}
+    return;
+  }
+  if (sub === 'status/crash') {
+    // Retained + published once per boot, so this normally arrives exactly once,
+    // right after connect — including for a stove that crashed weeks ago.
+    try { crash = JSON.parse(payload); crashRaw = payload; renderCrash(); } catch(e) {}
     return;
   }
   if (sub === 'status/heartbeat') {
@@ -665,6 +709,147 @@ function renderStats() {
     kv('Fault count', stats.faults ?? '—') +
     kv('Boot count', stats.boots ?? '—') +
     kv('Runtime hours', stats.runtime_hours ?? '—');
+}
+
+// Xtensa EXCCAUSE values worth naming. Mirrors the table in the firmware repo's
+// .claude/decode-crash.py — keep the two in sync.
+const EXCCAUSE = {
+  0:'IllegalInstruction', 1:'Syscall', 2:'InstructionFetchError', 3:'LoadStoreError',
+  4:'Level1Interrupt', 5:'Alloca', 6:'IntegerDivideByZero', 8:'Privileged',
+  9:'LoadStoreAlignment', 28:'LoadProhibited', 29:'StoreProhibited'
+};
+
+function isNullAddr(v) { return v === '0x00000000' || v === '0x0'; }
+
+// Reached when a stove connects but never sends status/crash — i.e. firmware older
+// than v5.2. Distinct from "no crashes recorded", which is a positive health signal;
+// this is an absence of information, and conflating the two would be a lie.
+function renderCrashUnsupported() {
+  let ver = '';
+  try { ver = (JSON.parse(extra['status/firmware'] || '{}').version) || ''; } catch(e) {}
+  document.getElementById('crash-banner').className = 'banner none';
+  document.getElementById('crash-banner').innerHTML =
+    `Not reported by this firmware` +
+    `<span class="code">crash reporting needs v5.2+${ver ? ` — stove is on ${escapeHtml(ver)}` : ''}</span>`;
+  document.getElementById('crash-grid').innerHTML = '';
+  document.getElementById('crash-bt').innerHTML = '';
+  document.getElementById('crash-actions').innerHTML =
+    `<div class="crash-hint">Flash v5.2 or later to capture panics, watchdog resets and
+     brownouts. See <code>CRASH_REPORTING.md</code> in the firmware repo.</div>`;
+}
+
+function renderCrash() {
+  const banner = document.getElementById('crash-banner');
+  const grid   = document.getElementById('crash-grid');
+  const btBox  = document.getElementById('crash-bt');
+  const acts   = document.getElementById('crash-actions');
+  if (!crash) return;
+
+  const last = crash.last;
+
+  // No `last` key = this stove has never crashed. That's the healthy case, and it
+  // should read as reassuring rather than as missing data.
+  if (!last) {
+    banner.className = 'banner ok';
+    banner.innerHTML = `✓ No crashes recorded <span class="code">last boot: ${crash.boot || '—'}</span>`;
+    grid.innerHTML  = kv('Lifetime crashes', crash.n ?? 0, 'ok') + kv('This boot', crash.boot ?? '—');
+    btBox.innerHTML = '';
+    acts.innerHTML  = '';
+    return;
+  }
+
+  const causeName = EXCCAUSE[last.cause] || '?';
+  const nullDeref = isNullAddr(last.vaddr);
+
+  // "new" = the stove rebooted INTO this report, i.e. it crashed on its last run.
+  // Otherwise we're showing a historical crash the retained topic still carries.
+  banner.className = crash.new ? 'banner crit' : 'banner warn';
+  banner.innerHTML = crash.new
+    ? `⚠ CRASHED — #${last.seq} ${last.reason}${last.task ? ` in task “${last.task}”` : ''}` +
+      `<span class="code">this boot followed the crash</span>`
+    : `Last crash #${last.seq} — ${last.reason}${last.task ? ` in task “${last.task}”` : ''}` +
+      `<span class="code">stove has rebooted cleanly since</span>`;
+
+  let g = '';
+  g += kv('Lifetime crashes', crash.n ?? '—', 'alert');
+  g += kv('This boot', crash.boot ?? '—', crash.new ? 'alert' : 'ok');
+  g += kv('Reason', last.reason ?? '—', 'alert');
+
+  if (last.task !== undefined) {
+    g += kv('Crashing task', last.task, 'alert');
+    g += kv('PC', last.pc ?? '—');
+    g += kv('EXCCAUSE', `${last.cause} (${causeName})`);
+    g += kv('EXCVADDR', `${last.vaddr}${nullDeref ? ' — null deref' : ''}`, nullDeref ? 'alert' : '');
+    g += kv('ELF SHA256', last.elf ?? '—');
+  } else {
+    g += kv('Core dump', 'none — reset left no dump', 'na');
+  }
+
+  if (last.up_s !== undefined) {
+    const h = Math.floor(last.up_s / 3600), m = Math.floor((last.up_s % 3600) / 60);
+    g += kv('Uptime before crash', `${h}h ${m}m`);
+    // Internal heap is the number that matters — see PSRAM_WIFI_CRASH.md. Anything
+    // under ~40 KB is worth suspicion; the WiFi RX crash happened around 22 KB.
+    const heapKB = (last.heap / 1024).toFixed(1);
+    g += kv('Internal heap at crash', `${heapKB} KB`, last.heap < 40000 ? 'alert' : 'ok');
+    g += kv('Internal min-free', `${(last.heap_min / 1024).toFixed(1)} KB`,
+            last.heap_min < 30000 ? 'alert' : '');
+    g += kv('System state', last.state ?? '—');
+  } else {
+    g += kv('Pre-crash context', 'none — stove lost power', 'na');
+  }
+
+  g += kv('Firmware', `${last.fw ?? '—'} @ ${last.commit ?? '—'}`,
+          String(last.commit || '').endsWith('-dirty') ? 'alert' : '');
+  grid.innerHTML = g;
+
+  // Backtrace — raw addresses. Decoding needs the SHA-matched ELF, which only
+  // exists on the build machine, so the app shows the frames and hands you the
+  // exact command rather than pretending it can symbolise them.
+  if (last.bt && last.bt.length) {
+    btBox.innerHTML =
+      `<div class="bt">${last.bt.map((a, i) =>
+        `<span class="frame-n">#${String(i).padStart(2)}</span>  <span class="frame-pc">${escapeHtml(a)}</span>`
+      ).join('\n')}</div>` +
+      (last.bt_bad ? `<div class="crash-hint" style="color:var(--amber)">⚠ backtrace flagged corrupted — frames may be unreliable</div>` : '');
+  } else {
+    btBox.innerHTML = '';
+  }
+
+  acts.innerHTML =
+    `<div class="crash-actions">
+       <button onclick="copyDecodeCmd()">Copy decode command</button>
+       <button onclick="copyCrashJson()">Copy raw JSON</button>
+     </div>
+     <div class="crash-hint">
+       Run the command in the <code>HenriLib</code> repo. It finds the ELF whose SHA256 starts
+       with <code>${escapeHtml(last.elf || '?')}</code> and symbolises these frames.
+       If it reports no matching ELF, that build was not archived —
+       see <code>CRASH_REPORTING.md</code> §5.
+     </div>`;
+}
+
+function copyDecodeCmd() {
+  // Single-quoted shell arg; the payload is firmware-generated JSON with no quotes
+  // of its own, but escape defensively anyway.
+  const safe = crashRaw.replace(/'/g, `'\\''`);
+  navigator.clipboard.writeText(`python3 .claude/decode-crash.py --json '${safe}'`)
+    .then(() => toastCrash('Decode command copied'))
+    .catch(() => toastCrash('Copy failed — clipboard blocked'));
+}
+
+function copyCrashJson() {
+  navigator.clipboard.writeText(crashRaw)
+    .then(() => toastCrash('Raw JSON copied'))
+    .catch(() => toastCrash('Copy failed — clipboard blocked'));
+}
+
+function toastCrash(msg) {
+  const hint = document.querySelector('#crash-actions .crash-hint');
+  if (!hint) return;
+  const prev = hint.innerHTML;
+  hint.innerHTML = `<span style="color:var(--green)">${msg}</span>`;
+  setTimeout(() => { hint.innerHTML = prev; }, 1800);
 }
 
 function renderAllFields() {
