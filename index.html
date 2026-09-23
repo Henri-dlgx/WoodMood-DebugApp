@@ -24,6 +24,7 @@
   @media (max-width:800px){.conn-grid{grid-template-columns:1fr 1fr}}
   input{background:#0d0f14;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px 10px;font-size:13px;width:100%}
   input:focus{outline:1px solid var(--blue)}
+  select{background:#0d0f14;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px 10px;font-size:13px}
   button{cursor:pointer;border:none;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:600}
   .btn-connect{background:var(--blue);color:#fff}
   .btn-connect.disconnect{background:#3a3f4b;color:var(--text)}
@@ -223,6 +224,8 @@
       <label class="export-label">Last</label>
       <input id="hist-hours" type="number" min="0.5" step="0.5" value="24" style="width:70px"/>
       <label class="export-label">hours</label>
+      <label class="export-label">Stove</label>
+      <select id="hist-stove" onchange="onHistStoveChange()"></select>
       <label class="export-label">Topic</label>
       <input id="hist-topic" placeholder="blank = the connected stove only" style="width:240px"/>
       <button class="btn-share" onclick="fetchHistory()">Fetch</button>
@@ -479,6 +482,7 @@ function saveAndConnect() {
   cfg.serial = document.getElementById('cfg-serial').value.trim();
   if (!cfg.broker || !cfg.user || !cfg.serial) { alert('Fill in broker, username and device serial'); return; }
   localStorage.setItem(LS, JSON.stringify(cfg));
+  fillSupabaseForm();
   connect();
 }
 
@@ -965,13 +969,40 @@ const SUPA_LS = 'woodmood_debug_supabase';
 let supaCfg = JSON.parse(localStorage.getItem(SUPA_LS) || '{}');
 let histRows = [];
 
+// Fleet serials (= the UNIT_* names in HenriLib Secrets.h). Supabase `device` is the bare serial.
+const HIST_STOVES = ['VEWGAX', 'JJQF9D', 'AFNMU3', '87FQ8F', 'MRUNDG', 'C5KA7T'];
+const HIST_STOVE_LS = 'woodmood_debug_hist_stove';
+
+// '' = follow the connected stove (previous behaviour).
+function histStove() {
+  return document.getElementById('hist-stove').value || cfg.serial || '';
+}
+
+function fillHistStoveSelect() {
+  const sel = document.getElementById('hist-stove');
+  let saved = '';
+  try { saved = localStorage.getItem(HIST_STOVE_LS) || ''; } catch (e) {}
+  sel.innerHTML = `<option value="">${cfg.serial ? `Connected (${cfg.serial})` : 'Connected stove / all'}</option>`
+    + HIST_STOVES.map(s => `<option value="${s}">${s}</option>`).join('');
+  sel.value = HIST_STOVES.includes(saved) ? saved : '';
+}
+
+function onHistStoveChange() {
+  try { localStorage.setItem(HIST_STOVE_LS, document.getElementById('hist-stove').value); } catch (e) {}
+  fillSupabaseForm();
+}
+
 function fillSupabaseForm() {
   document.getElementById('supa-url').value = supaCfg.url || '';
   document.getElementById('supa-key').value = supaCfg.key || '';
+  const sel = document.getElementById('hist-stove');
+  if (!sel.options.length) fillHistStoveSelect();
+  else sel.options[0].textContent = cfg.serial ? `Connected (${cfg.serial})` : 'Connected stove / all';
+  const stove = histStove();
   const topicEl = document.getElementById('hist-topic');
-  topicEl.placeholder = cfg.serial
-    ? `blank = ${cfg.serial} only, or set an exact topic e.g. WoodMood${cfg.serial}/status/full`
-    : 'blank = all topics (connect to a stove to default to just that one)';
+  topicEl.placeholder = stove
+    ? `blank = ${stove} only, or set an exact topic e.g. WoodMood${stove}/status/full`
+    : 'blank = all topics (pick a stove or connect to one to narrow it)';
 }
 
 function saveSupabaseConfig() {
@@ -995,7 +1026,8 @@ async function fetchHistory() {
   const topic = document.getElementById('hist-topic').value.trim();
   let filter = '';
   if (topic) filter = `&topic=eq.${encodeURIComponent(topic)}`;
-  else if (cfg.serial) filter = `&device=eq.${encodeURIComponent(cfg.serial)}`;
+  const stove = histStove();
+  if (!topic && stove) filter = `&device=eq.${encodeURIComponent(stove)}`;
   const headers = { apikey: supaCfg.key, Authorization: `Bearer ${supaCfg.key}` };
   const rows = [];
   let latest = null;
@@ -1009,7 +1041,7 @@ async function fetchHistory() {
     latest = (await latestRes.json())[0]?.received_at;
     if (!latest) {
       histRows = [];
-      info.textContent = 'No rows found in the database' + (topic ? ` for ${topic}` : cfg.serial ? ` for device ${cfg.serial}` : '') + '.';
+      info.textContent = 'No rows found in the database' + (topic ? ` for ${topic}` : stove ? ` for device ${stove}` : '') + '.';
       renderHistoryTable();
       analyzeHistory();
       return;
@@ -1034,7 +1066,7 @@ async function fetchHistory() {
   const capped = rows.length >= HIST_MAX_ROWS ? ` — capped at ${HIST_MAX_ROWS}, narrow the range/topic for a complete set` : '';
   const staleNote = (Date.now() - new Date(latest).getTime() > 3600000)
     ? ` (last activity: ${new Date(latest).toLocaleString()})` : '';
-  info.textContent = `${histRows.length} rows over the last ${hours}h of activity${staleNote}` + (topic ? ` for ${topic}` : '') + capped;
+  info.textContent = `${histRows.length} rows over the last ${hours}h of activity${staleNote}` + (topic ? ` for ${topic}` : stove ? ` for ${stove}` : '') + capped;
   renderHistoryTable();
   analyzeHistory();
 }
@@ -1668,7 +1700,7 @@ function downloadHistoryCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `woodmood_cloud_history_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  a.download = `woodmood_cloud_history_${histStove() || 'all'}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
