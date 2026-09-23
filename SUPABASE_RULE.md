@@ -90,6 +90,96 @@ Unlike `status/full` (1 Hz), `status/crash` is published **once per boot** and i
 > Use `+/status/...`. This broker only carries `WoodMood…` topics, so a bare `+`
 > first level is safe here.
 
+## Optional: retention / downsampling (staying on the Supabase free plan)
+
+> **Status: NOT ENABLED.** Nothing deletes rows today — `logs` grows forever.
+> Fine with two stoves; switch this on when the fleet grows or **Disk Usage**
+> (Supabase dashboard → Overview) heads towards the free plan's **500 MB**
+> database limit. Everything below is run by hand in the Supabase **SQL Editor**;
+> nothing in this repo does it.
+
+`status/full` arrives at 1 Hz per stove and is by far the biggest topic. The plan:
+
+- **Last hour:** keep every row (full 1 s resolution for live debugging).
+- **Older than 1 hour:** thin `status/full` to **one row per stove per minute** (~60× smaller).
+- **Older than N days:** delete everything.
+- `status/diag`, `status/stats`, `status/crash` are never thinned — they're small,
+  infrequent, and a short-lived diag code is exactly what you want to find later.
+
+### Check the current size first
+
+```sql
+select pg_size_pretty(pg_total_relation_size('logs')) as logs_size,
+       count(*) as rows, min(received_at) as oldest
+from logs;
+```
+
+### Enable
+
+```sql
+create extension if not exists pg_cron;
+create index if not exists logs_time_idx        on logs (received_at);
+create index if not exists logs_device_time_idx on logs (device, received_at);
+
+-- Thin status/full older than 1 h to the first row of each minute, per stove.
+-- Only looks back 1 day, so each run is cheap (anything older was already thinned).
+create or replace function thin_logs() returns void language sql as $$
+  delete from logs l
+  using (
+    select ctid,
+           row_number() over (
+             partition by device, date_trunc('minute', received_at)
+             order by received_at
+           ) as rn
+    from logs
+    where topic like '%/status/full'
+      and received_at <  now() - interval '1 hour'
+      and received_at >= now() - interval '1 day'
+  ) d
+  where l.ctid = d.ctid and d.rn > 1;
+$$;
+
+select cron.schedule('thin-logs',  '*/15 * * * *', 'select thin_logs()');
+
+-- Hard cutoff: drop everything older than 60 days (tune — see below)
+select cron.schedule('prune-logs', '17 3 * * *',
+  $$delete from logs where received_at < now() - interval '60 days'$$);
+```
+
+**One-time backlog cleanup** (the cron job only looks back 1 day, so thin what's
+already there once, then reclaim the disk space):
+
+```sql
+delete from logs l
+using (select ctid, row_number() over (partition by device, date_trunc('minute', received_at)
+                                        order by received_at) rn
+       from logs where topic like '%/status/full' and received_at < now() - interval '1 hour') d
+where l.ctid = d.ctid and d.rn > 1;
+
+vacuum full logs;   -- shrinks the file on disk; locks the table for a few seconds
+```
+
+**Tuning the 60 days:** after a day, re-run the size query, work out MB/day, and
+pick a cutoff that stays under ~350 MB. Postgres reuses space freed by deletes, so
+the size plateaus rather than creeping up.
+
+### Check / disable
+
+```sql
+select jobname, schedule, active from cron.job;                    -- is it on?
+select * from cron.job_run_details order by start_time desc limit 10;  -- did it run OK?
+
+select cron.unschedule('thin-logs');    -- turn off thinning
+select cron.unschedule('prune-logs');   -- turn off the hard cutoff
+```
+
+### Effect on the History tab
+
+Older than 1 hour, charts show one point per minute — temperature and fan curves
+look the same. The Timeline's **insertion-active lane** and **between-log gaps**
+become approximate (±1 min) for that older data, because a few-second insertion can
+fall between kept samples. The last hour is unaffected.
+
 ## Adding a new stove — checklist
 
 1. **Firmware:** set `MQTT_DEVICE_SERIAL` (and, in per-serial mode, `MQTT_DEVICE_SECRET`) in that unit's untracked `Secrets.h` (Arduino lib repo). See `PER_SERIAL_AUTH_GUIDE.md`.
