@@ -90,12 +90,28 @@
   .tabs{display:flex;gap:6px;margin-bottom:14px}
   .tab-btn{background:var(--card);border:1px solid var(--border);color:var(--dim);border-radius:8px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer}
   .tab-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+  /* unit bar — serial, firmware version and code line, next to the title */
+  .head-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+  .head-row h1{margin:0}
+  .unit-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .ubadge{display:inline-flex;align-items:center;gap:5px;border-radius:12px;padding:3px 10px;font-size:12px;font-weight:600;border:1px solid var(--border);background:var(--card);color:var(--text)}
+  .ubadge.dim{color:var(--dim);font-weight:400}
+  .ubadge.demo{border-color:var(--amber);color:var(--amber);background:rgba(245,166,35,.1)}
+  .ubadge.mainline{border-color:var(--green);color:var(--green);background:rgba(46,204,113,.1)}
+  .ubadge .ctx{font-size:10px;color:var(--dim);font-weight:400}
+
+  .feed-events{margin-top:10px;font-size:12px}
+  .feed-events .log-row{border-bottom:1px solid #191c22}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <h1>WoodMood Debug</h1>
+  <div class="head-row">
+    <h1>WoodMood Debug</h1>
+    <div class="unit-bar" id="unit-bar"></div>
+  </div>
   <div class="sub">Live MQTT inspector — shows every value the stove publishes so you can see exactly why something isn't running.</div>
 
   <div class="tabs">
@@ -139,6 +155,13 @@
       <div class="li-stat"><div class="li-val" id="li-ago">—</div><div class="li-label">Since last insert</div></div>
       <div class="li-stat"><div class="li-val" id="li-side">—</div><div class="li-label">Side &amp; position</div></div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Feeding (automatic vs manual)</h2>
+    <div class="grid" id="feed-grid"><div class="empty">No data yet</div></div>
+    <div class="feed-events" id="feed-events"></div>
+    <div class="share-note">In manual feeding the stove never loads a log itself — when one is due it beeps and asks. It counts a log as added when the main door is opened and closed, the app's “C'est fait” is pressed, or the maintenance button is tapped while the request is up. That moment resets “since last insert”, which is how this page spots it.</div>
   </div>
 
   <div class="two-col">
@@ -237,7 +260,7 @@
 
   <div class="card">
     <h2>Timeline</h2>
-    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp, fan speeds and chip temp overlaid — each scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), and whether auto-insertion was actually able to run, all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
+    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp, fan speeds and chip temp overlaid — each scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, and automatic vs manual feeding (with hand-fed logs marked), all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
     <div id="tl-empty" class="empty">Fetch data first — the timeline is built from status/full history.</div>
     <div id="tl-body" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
@@ -262,6 +285,15 @@
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(138,144,162,.5)"></span>setpoint · constant</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(46,204,113,.55)"></span>insertion · active</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(229,72,77,.55)"></span>insertion · blocked (hover for the reason)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px dashed #34d399"></span><span style="width:8px;height:8px;background:#34d399;transform:rotate(45deg)"></span>log added by hand (stove counted it)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(187,134,252,.45)"></span>feed · manual</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(245,166,35,.55)"></span>feed · log requested</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(229,72,77,.55)"></span>feed · request missed</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(138,144,162,.3)"></span>feed · automatic</span>
+      </div>
+      <div style="margin-top:12px">
+        <div style="font-size:12px;color:var(--dim);margin-bottom:6px">Diagnostic codes in the window — how often each came up and for how long (spot the recurring ones)</div>
+        <div id="tl-codes" style="display:flex;flex-wrap:wrap;gap:6px"></div>
       </div>
     </div>
   </div>
@@ -336,7 +368,16 @@ const DIAG = {
   15: { text: 'Trapdoor not fully closed — insertion blocked',         sev: 'warn' },
   16: { text: 'Insertion refused — minimum interval not elapsed',      sev: 'warn' },
   17: { text: 'Manual insert refused — see serial log for reason',     sev: 'warn' },
+  18: { text: 'Fire went out — reload and press Start',                sev: 'crit' },
+  19: { text: 'WiFi just reconnected — insertion unlocks shortly',     sev: 'warn' },
+  20: { text: 'Out of logs for 45+ min — auto-cooled down; reload and press Start', sev: 'crit' },
+  21: { text: 'Manual feeding — the stove will ask you for logs',      sev: 'none' },
+  22: { text: 'Add a log — manual feeding, a log is due now',          sev: 'warn' },
+  23: { text: 'No log added in time — auto-cooled down; reload and press Start', sev: 'crit' },
+  24: { text: 'Closing the trapdoors — insertion resumes when done',   sev: 'warn' },
+  25: { text: 'Trapdoor presumed open — run a forced close to re-arm insertion', sev: 'warn' },
 };
+const DIAG_RELOAD_REQUESTED = 22, DIAG_MANUAL_NOT_RELOADED = 23;
 
 // ============================================================
 // STATE
@@ -355,6 +396,17 @@ let lastInsertBaseSec = null;  // last_insert_ago_sec as of the most recent stat
 let lastInsertBaseAt  = null;  // Date.now() when that value was received
 let extra = {};  // other individual topics: online, firmware, ntfy_link, diag, fault_msg
 
+// Manual feeding (firmware FEED_MANUAL). status/reload_req is retained and
+// edge-published; since_sec is stamped at PUBLISH time, so a retained replay on
+// connect only tells us the request is at least that old.
+let reloadReq = null;          // parsed status/reload_req
+let reloadReqRaisedAt = null;  // local ms estimate of when the current request went up
+let reloadReqRetained = false; // true = came from a retained replay, age is a lower bound
+let prevInsert = null;         // { ever, agoSec, at } from the previous status/full
+let lastInsertKind = null;     // 'hand' | 'machine' — only known for inserts seen this session
+let feedEvents = [];
+let liveSerial = null;         // serial the per-stove state above belongs to           // [{ t, kind }] hand-fed logs / machine inserts seen this session
+
 // ============================================================
 // HISTORY RECORDING (for CSV export)
 // ============================================================
@@ -370,6 +422,7 @@ window.addEventListener('load', () => {
   setInterval(tickClock, 1000);
   loadHistory();
   fillSupabaseForm();
+  renderUnitBar();
 });
 
 // ============================================================
@@ -380,6 +433,66 @@ function switchTab(name) {
   document.getElementById('tab-history').style.display = name === 'history' ? '' : 'none';
   document.getElementById('tab-btn-live').classList.toggle('active', name === 'live');
   document.getElementById('tab-btn-history').classList.toggle('active', name === 'history');
+  renderUnitBar();
+}
+
+// ============================================================
+// UNIT BAR — serial · firmware version · demo/mainline, shown next
+// to the title. Live tab = the connected stove; History tab = the
+// stove whose rows were last fetched.
+// ============================================================
+// Which firmware line a build came from. The firmware has no explicit field for
+// this yet (status/firmware's `branch` is not trustworthy — VersionInfo.h is not
+// stamped in worktree builds), so unless the firmware reports `line`, infer it:
+// manual feeding (`feed_manual` in status/full) exists only on the WM-code-demo
+// line; no WM_code (mainline) branch has it. Revisit when demo work is promoted.
+function inferLine(fw, sawFull, hasFeedManual) {
+  const explicit = String((fw && (fw.line || fw.channel)) || '').toLowerCase();
+  if (explicit) return { line: explicit.includes('demo') ? 'demo' : 'mainline', why: 'reported by the firmware' };
+  if (!sawFull) return { line: null, why: 'waiting for status/full' };
+  return hasFeedManual
+    ? { line: 'demo', why: 'inferred — status/full has feed_manual, which only exists on the WM-code-demo line' }
+    : { line: 'mainline', why: 'inferred — status/full has no feed_manual, so this is a WM_code (mainline) build' };
+}
+
+function liveFirmware() {
+  let fw = {};
+  try { fw = JSON.parse(extra['status/firmware'] || '{}'); } catch (e) {}
+  return {
+    version: fw.version || full.fw_version || '',
+    commit:  fw.commit  || full.fw_commit  || '',
+    build:   fw.build_date || full.fw_build || '',
+    raw: fw,
+  };
+}
+
+function renderUnitBar() {
+  const el = document.getElementById('unit-bar');
+  if (!el) return;
+  const onHist = document.getElementById('tab-history').style.display !== 'none';
+  let serial, fw, ln, ctx = '';
+  if (onHist) {
+    serial = histUnit.serial;
+    fw = histUnit.fw;
+    ln = inferLine(fw.raw, histUnit.sawFull, histUnit.hasFeedManual);
+    if (serial && histUnit.asOf) ctx = 'as of ' + new Date(histUnit.asOf).toLocaleString();
+    if (!serial) { el.innerHTML = `<span class="ubadge dim">Fetch history to see the unit</span>`; return; }
+  } else {
+    serial = cfg.serial;
+    fw = liveFirmware();
+    ln = inferLine(fw.raw, Object.keys(full).length > 0, 'feed_manual' in full);
+    if (!serial) { el.innerHTML = `<span class="ubadge dim">Not connected</span>`; return; }
+  }
+  const verTitle = [fw.commit && 'commit ' + fw.commit, fw.build && 'built ' + fw.build].filter(Boolean).join(' · ');
+  const lineBadge = ln.line
+    ? `<span class="ubadge ${ln.line}" title="${escapeHtml(ln.why)}">${ln.line === 'demo' ? 'DEMO' : 'MAINLINE'}</span>`
+    : `<span class="ubadge dim" title="${escapeHtml(ln.why)}">line ?</span>`;
+  el.innerHTML =
+    `<span class="ubadge">${escapeHtml(serial)}</span>` +
+    `<span class="ubadge${fw.version ? '' : ' dim'}" title="${escapeHtml(verTitle)}">${fw.version ? escapeHtml(fw.version) : (onHist ? 'version not logged' : 'version ?')}` +
+      `${fw.commit ? ` <span class="ctx">${escapeHtml(fw.commit)}</span>` : ''}</span>` +
+    lineBadge +
+    (ctx ? `<span class="ubadge dim">${escapeHtml(ctx)}</span>` : '');
 }
 
 // ============================================================
@@ -388,6 +501,8 @@ function switchTab(name) {
 function tickClock() {
   document.getElementById('li-time').textContent =
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+  renderFeeding();
 
   const el = document.getElementById('li-ago');
   if (lastInsertBaseSec === null) { el.textContent = full.last_insert_ever === false ? 'Never' : '—'; return; }
@@ -404,6 +519,7 @@ function formatDuration(totalSec) {
 }
 
 function renderLastInsert() {
+  detectInsertion();
   const sideEl = document.getElementById('li-side');
   if (!full.last_insert_ever) {
     lastInsertBaseSec = null;
@@ -412,9 +528,72 @@ function renderLastInsert() {
   }
   lastInsertBaseSec = full.last_insert_ago_sec ?? 0;
   lastInsertBaseAt  = Date.now();
+  // A hand-fed log re-anchors last_insert_ago_sec but leaves last_insert_side on
+  // the last MACHINE insert, so the side would be misleading here.
+  if (lastInsertKind === 'hand') { sideEl.textContent = 'Hand-fed'; return; }
   const side = full.last_insert_side || '—';
   const pos = side === 'Right' ? full.log_r : side === 'Left' ? full.log_l : undefined;
   sideEl.textContent = side + (pos !== undefined ? ' ' + pos : '');
+}
+
+// last_insert_ago_sec only ever counts up, except when a log goes in: a machine
+// insertion, or — in manual feeding — the user acknowledging the reload request
+// (recordHandFedLog() in the firmware). So a drop below the expected value is an
+// insertion, and feed_manual at that moment says which kind.
+function detectInsertion() {
+  const now = Date.now();
+  const cur = { ever: full.last_insert_ever === true, agoSec: full.last_insert_ago_sec, at: now };
+  const p = prevInsert;
+  prevInsert = cur;
+  if (!p || typeof cur.agoSec !== 'number' || !cur.ever) return;
+  const expected = p.ever && typeof p.agoSec === 'number' ? p.agoSec + (now - p.at) / 1000 : Infinity;
+  if (cur.agoSec >= expected - 5) return;
+  const kind = full.feed_manual === true ? 'hand' : 'machine';
+  lastInsertKind = kind;
+  feedEvents.unshift({ t: now - cur.agoSec * 1000, kind });
+  if (feedEvents.length > 50) feedEvents.length = 50;
+}
+
+function renderFeeding() {
+  const g = document.getElementById('feed-grid');
+  if (!Object.keys(full).length) return;
+  if (!('feed_manual' in full)) {
+    g.innerHTML = kv('Feed mode', 'Automatic only — this firmware has no manual feeding', 'na');
+    document.getElementById('feed-events').innerHTML = '';
+    return;
+  }
+  const manual = full.feed_manual === true;
+  // diag_code comes from the live 1 Hz snapshot, so it is the authority on
+  // whether a request is up right now; reload_req adds the prompt number/age.
+  const asking = full.diag_code === DIAG_RELOAD_REQUESTED;
+  const missed = full.diag_code === DIAG_MANUAL_NOT_RELOADED;
+  let askVal = 'no', askCls = 'ok';
+  if (asking) {
+    askVal = 'YES — add a log';
+    if (reloadReq && reloadReq.pending) {
+      askVal += ` (prompt ${reloadReq.n}/4`;
+      if (reloadReqRaisedAt) askVal += `, ${reloadReqRetained ? '≥ ' : ''}${formatDuration(Math.floor((Date.now() - reloadReqRaisedAt) / 1000))}`;
+      askVal += ')';
+    }
+    askCls = 'alert';
+  } else if (missed) { askVal = 'Missed — stove cooled itself down'; askCls = 'alert'; }
+  else if (!manual) { askVal = '—'; askCls = 'na'; }
+
+  const hands = feedEvents.filter(e => e.kind === 'hand');
+  const lastHand = hands[0];
+  g.innerHTML =
+    kv('Feed mode', manual ? 'MANUAL — user loads the logs' : 'Automatic — stove loads the logs', manual ? '' : 'ok') +
+    kv('Log requested now', askVal, askCls) +
+    kv('Last hand-fed log', lastHand
+      ? `${new Date(lastHand.t).toLocaleTimeString()} (${formatDuration(Math.floor((Date.now() - lastHand.t) / 1000))} ago)`
+      : 'none seen since connecting', lastHand ? '' : 'na') +
+    kv('Hand-fed logs this session', hands.length);
+
+  const ev = document.getElementById('feed-events');
+  ev.innerHTML = feedEvents.slice(0, 8).map(e =>
+    `<div class="log-row"><span class="log-time">${new Date(e.t).toLocaleTimeString()}</span>` +
+    `<span class="log-payload" style="color:${e.kind === 'hand' ? '#34d399' : 'var(--dim)'}">` +
+    `${e.kind === 'hand' ? 'Stove counted a log as added by the user' : 'Machine insertion'}</span></div>`).join('');
 }
 
 function fillForm() {
@@ -509,6 +688,14 @@ function connect() {
     // Drop the previous stove's crash state — otherwise connecting to a second
     // stove would keep showing the first one's crash, which is worse than useless.
     crash = null; crashRaw = '';
+    // Per-stove state — only wiped when the serial changes, not on every
+    // auto-reconnect, or a WiFi blip would erase the hand-fed log history.
+    if (liveSerial !== cfg.serial) {
+      liveSerial = cfg.serial;
+      full = {}; extra = {};
+      reloadReq = null; reloadReqRaisedAt = null; prevInsert = null; lastInsertKind = null; feedEvents = [];
+    }
+    renderUnitBar();
     document.getElementById('crash-banner').className = 'banner none';
     document.getElementById('crash-banner').textContent = 'Waiting for status/crash…';
     document.getElementById('crash-grid').innerHTML = '';
@@ -545,7 +732,7 @@ function setDot(state, label) {
 // ============================================================
 // MESSAGE HANDLING
 // ============================================================
-function onMessage(topic, payloadBuf) {
+function onMessage(topic, payloadBuf, packet) {
   const payload = payloadBuf.toString();
   const sub = topic.replace(prefix + '/', '');
   msgCount++;
@@ -567,6 +754,15 @@ function onMessage(topic, payloadBuf) {
     try { crash = JSON.parse(payload); crashRaw = payload; renderCrash(); } catch(e) {}
     return;
   }
+  if (sub === 'status/reload_req') {
+    try {
+      reloadReq = JSON.parse(payload);
+      reloadReqRetained = !!(packet && packet.retain);
+      reloadReqRaisedAt = reloadReq.pending ? Date.now() - (reloadReq.since_sec || 0) * 1000 : null;
+      renderFeeding();
+    } catch(e) {}
+    return;
+  }
   if (sub === 'status/heartbeat') {
     // Debug app acts as a valid heartbeat client so opening this tool alone
     // doesn't itself trigger DIAG_HEARTBEAT_UNHEALTHY / suspend auto-insertion.
@@ -577,6 +773,7 @@ function onMessage(topic, payloadBuf) {
       sub === 'status/diag' || sub === 'status/fault_msg' || sub === 'status/fault') {
     extra[sub] = payload;
     renderNet();
+    if (sub === 'status/firmware') renderUnitBar();
     return;
   }
 }
@@ -615,6 +812,8 @@ function boolKv(label, val, invert) {
 function renderAll() {
   renderBanner();
   renderLastInsert();
+  renderFeeding();
+  renderUnitBar();
   renderDoors();
   renderFault();
   renderTemp();
@@ -968,6 +1167,10 @@ function downloadCsv(all) {
 const SUPA_LS = 'woodmood_debug_supabase';
 let supaCfg = JSON.parse(localStorage.getItem(SUPA_LS) || '{}');
 let histRows = [];
+// Unit shown in the header while on the History tab. status/firmware is only in
+// Supabase once the EMQX rule's FROM includes "+/status/firmware" (see
+// SUPABASE_RULE.md); older mainline builds also carry fw_* inside status/full.
+let histUnit = { serial: '', fw: { version: '', commit: '', build: '', raw: {} }, asOf: null, sawFull: false, hasFeedManual: false };
 
 // Fleet serials (= the UNIT_* names in HenriLib Secrets.h). Supabase `device` is the bare serial.
 const HIST_STOVES = ['VEWGAX', 'JJQF9D', 'AFNMU3', '87FQ8F', 'MRUNDG', 'C5KA7T'];
@@ -1041,6 +1244,8 @@ async function fetchHistory() {
     latest = (await latestRes.json())[0]?.received_at;
     if (!latest) {
       histRows = [];
+      histUnit = { serial: stove, fw: { version: '', commit: '', build: '', raw: {} }, asOf: null, sawFull: false, hasFeedManual: false };
+      renderUnitBar();
       info.textContent = 'No rows found in the database' + (topic ? ` for ${topic}` : stove ? ` for device ${stove}` : '') + '.';
       renderHistoryTable();
       analyzeHistory();
@@ -1063,12 +1268,45 @@ async function fetchHistory() {
     return;
   }
   histRows = rows;
+  await loadHistUnit(stove, topic, latest, headers);
   const capped = rows.length >= HIST_MAX_ROWS ? ` — capped at ${HIST_MAX_ROWS}, narrow the range/topic for a complete set` : '';
   const staleNote = (Date.now() - new Date(latest).getTime() > 3600000)
     ? ` (last activity: ${new Date(latest).toLocaleString()})` : '';
   info.textContent = `${histRows.length} rows over the last ${hours}h of activity${staleNote}` + (topic ? ` for ${topic}` : stove ? ` for ${stove}` : '') + capped;
   renderHistoryTable();
   analyzeHistory();
+}
+
+// Firmware identity for the History header, as of the end of the fetched window.
+async function loadHistUnit(stove, topic, latest, headers) {
+  let serial = stove;
+  if (!serial) {
+    const m = /^WoodMood([^/]+)\//.exec(topic || (histRows[0] && histRows[0].topic) || '');
+    serial = m ? m[1] : '';
+  }
+  const fullRows = histRows.filter(r => /\/status\/full$/.test(r.topic) && r.payload && typeof r.payload === 'object');
+  const u = { serial, fw: { version: '', commit: '', build: '', raw: {} }, asOf: latest,
+              sawFull: fullRows.length > 0, hasFeedManual: fullRows.some(r => 'feed_manual' in r.payload) };
+  // Mainline builds up to v5.1 put fw_* in every status/full — newest wins.
+  for (let i = fullRows.length - 1; i >= 0; i--) {
+    const p = fullRows[i].payload;
+    if (p.fw_version) { u.fw = { version: p.fw_version, commit: p.fw_commit || '', build: p.fw_build || '', raw: {} }; break; }
+  }
+  if (serial) {
+    try {
+      const q = `${supaCfg.url}/rest/v1/logs?select=payload,received_at`
+        + `&topic=eq.${encodeURIComponent('WoodMood' + serial + '/status/firmware')}`
+        + `&received_at=lte.${encodeURIComponent(latest)}&order=received_at.desc&limit=1`;
+      const res = await fetch(q, { headers });
+      if (res.ok) {
+        const row = (await res.json())[0];
+        const p = row && (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload);
+        if (p && p.version) u.fw = { version: p.version, commit: p.commit || '', build: p.build_date || '', raw: p };
+      }
+    } catch (e) { /* no firmware rows logged — keep the status/full fallback */ }
+  }
+  histUnit = u;
+  renderUnitBar();
 }
 
 // ============================================================
@@ -1427,6 +1665,24 @@ const TL_IACOL = {
   on:  { fill: 'rgba(46,204,113,0.30)', tx: '#7ee2a8', name: 'active'  },
   off: { fill: 'rgba(229,72,77,0.28)',  tx: '#ff9ba0', name: 'blocked' },
 };
+// Diagnostic-code lane (directly under insertion active/blocked): one block per
+// run of the same code, labelled with the number, coloured by severity.
+const TL_CODECOL = {
+  ok:   { fill: 'rgba(46,204,113,0.22)',  tx: '#7ee2a8' },
+  crit: { fill: 'rgba(229,72,77,0.30)',   tx: '#ff9ba0' },
+  warn: { fill: 'rgba(245,166,35,0.28)',  tx: '#f7c477' },
+  none: { fill: 'rgba(138,144,162,0.22)', tx: '#c2c7d4' },
+};
+function tlCodeCol(code) { return TL_CODECOL[(DIAG[code] || { sev: 'warn' }).sev] || TL_CODECOL.warn; }
+// Feed lane — who loads the logs (firmware feed_manual) and, in manual, whether
+// the stove is asking for one (diag 22) or gave up waiting (diag 23).
+const TL_FDCOL = {
+  auto:   { fill: 'rgba(138,144,162,0.16)', tx: '#8a90a2', name: 'automatic' },
+  manual: { fill: 'rgba(187,134,252,0.30)', tx: '#d6b8ff', name: 'manual' },
+  ask:    { fill: 'rgba(245,166,35,0.40)',  tx: '#f7c477', name: 'log requested' },
+  missed: { fill: 'rgba(229,72,77,0.36)',   tx: '#ff9ba0', name: 'request missed' },
+};
+const TL_HAND = '#34d399';
 const TL_INS = '#e5484d', TL_TRANS = '#bb86fc', TL_AXIS = '#8a90a2', TL_GRID = 'rgba(138,144,162,0.15)', TL_SURF = '#0d0f14';
 // viewBox geometry (the SVG scales to the card width)
 // TL_GY is the gap-pill row. It sits on the midline between the two log tracks
@@ -1434,7 +1690,8 @@ const TL_INS = '#e5484d', TL_TRANS = '#bb86fc', TL_AXIS = '#8a90a2', TL_GRID = '
 // enough that the pills never touch the per-side insertion markers.
 const TLX0 = 50, TLW = 900, TLY0 = 12, TLH = 170, TLY1 = 182,
       TL_LLY = 200, TL_LRY = 228, TL_GY = 214, TL_SY = 240, TL_SH = 24, TL_SPY = 272, TL_SPH = 30,
-      TL_IAY = 310, TL_IAH = 24, TL_VB = TL_SY + TL_SH;
+      TL_IAY = 310, TL_IAH = 24, TL_CDY = 340, TL_CDH = 22, TL_FDY = 368, TL_FDH = 22,
+      TL_VBH = 398, TL_VB = TL_SY + TL_SH;
 
 let tlEnabled = { stove_temp: true, fan_main: true, fan_cooling: true, room_temp: false, chip_temp: true };
 let tlNorm = true;
@@ -1496,7 +1753,9 @@ function tlBuild() {
     const p = fr.p;
     if (p.last_insert_ever === false) return;
     if (typeof p.last_insert_ago_sec !== 'number') return;
-    raw.push({ t: fr.t - p.last_insert_ago_sec * 1000, side: tlSideKey(p.last_insert_side || 'L') });
+    // In manual feeding the machine never inserts, so a fresh re-anchor of
+    // last_insert_ago_sec there is the stove counting a log the user added.
+    raw.push({ t: fr.t - p.last_insert_ago_sec * 1000, side: tlSideKey(p.last_insert_side || 'L'), hand: p.feed_manual === true });
   });
   raw.sort((a, b) => a.t - b.t);
   const events = [];
@@ -1526,7 +1785,15 @@ function tlBuild() {
     g.on   = g.code === 0;
   });
 
-  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, spMin: spMin - pad, spMax: spMax + pad, fullRows };
+  const fdSeg = tlSegments(fullRows, fr => {
+    if (typeof fr.p.feed_manual !== 'boolean') return undefined;
+    if (!fr.p.feed_manual) return 'auto';
+    if (fr.p.diag_code === DIAG_RELOAD_REQUESTED) return 'ask';
+    if (fr.p.diag_code === DIAG_MANUAL_NOT_RELOADED) return 'missed';
+    return 'manual';
+  }, tMax);
+
+  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, fdSeg, spMin: spMin - pad, spMax: spMax + pad, fullRows };
 }
 
 function tlGlobalMax() {
@@ -1585,7 +1852,7 @@ function tlDraw() {
   const gmax = tlGlobalMax();
   const yF = (s, v) => { let f; if (tlNorm) { const r = tlData.series[s.key]; f = (v - r.min) / ((r.max - r.min) || 1); } else { f = v / gmax; } return TLY1 - Math.max(-0.04, Math.min(1.04, f)) * TLH; };
   const p = [];
-  p.push(`<svg viewBox="0 0 960 344" width="100%" style="display:block">`);
+  p.push(`<svg viewBox="0 0 960 ${TL_VBH}" width="100%" style="display:block">`);
   p.push(`<defs><clipPath id="tlpc"><rect x="${TLX0}" y="${TLY0}" width="${TLW}" height="${TLH}"/></clipPath></defs>`);
   [0, .25, .5, .75, 1].forEach(f => { const y = TLY1 - f * TLH; p.push(`<line x1="${TLX0}" y1="${y}" x2="${TLX0 + TLW}" y2="${y}" stroke="${TL_GRID}"/>`); p.push(`<text x="${TLX0 - 7}" y="${y + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${tlNorm ? Math.round(f * 100) + '%' : Math.round(f * gmax)}</text>`); });
   const ticks = 6;
@@ -1594,10 +1861,22 @@ function tlDraw() {
   tlData.spSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = TL_SPCOL[g.mode] || TL_SPCOL.fixed; p.push(`<rect x="${xa}" y="${TL_SPY}" width="${w}" height="${TL_SPH}" fill="${col.band}"/>`); const frac = Math.max(0, Math.min(1, (g.sp - tlData.spMin) / ((tlData.spMax - tlData.spMin) || 1))), lh = frac * TL_SPH; p.push(`<rect x="${xa}" y="${TL_SPY + TL_SPH - lh}" width="${w}" height="${lh}" fill="${col.lvl}"/>`); if (w > 26) { p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 14}" text-anchor="middle" font-size="12" fill="${col.tx}">${Math.round(g.sp)}°</text>`); if (w > 66) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 26}" text-anchor="middle" font-size="9" fill="${col.tx}">${col.name}</text>`); } });
   tlData.spSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TL_SPY - 3}" x2="${x}" y2="${TL_SPY + TL_SPH + 3}" stroke="${TL_AXIS}" stroke-dasharray="1 3"/>`); });
   tlData.iaSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = g.on ? TL_IACOL.on : TL_IACOL.off; p.push(`<rect x="${xa}" y="${TL_IAY}" width="${w}" height="${TL_IAH}" fill="${col.fill}"/>`); if (w > 46) p.push(`<text x="${(xa + xb) / 2}" y="${TL_IAY + TL_IAH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
-  [['log_l', TL_LLY], ['log_r', TL_LRY], ['side', TL_SY + TL_SH / 2], ['setpoint', TL_SPY + TL_SPH / 2], ['insertion', TL_IAY + TL_IAH / 2]].forEach(l => p.push(`<text x="${TLX0 - 7}" y="${l[1] + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${l[0]}</text>`));
+  tlData.iaSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = tlCodeCol(g.code); p.push(`<rect x="${xa}" y="${TL_CDY}" width="${w}" height="${TL_CDH}" fill="${col.fill}"/>`); if (w > 3) p.push(`<line x1="${xa}" y1="${TL_CDY}" x2="${xa}" y2="${TL_CDY + TL_CDH}" stroke="${TL_SURF}" stroke-width="1"/>`); if (w > 14) p.push(`<text x="${(xa + xb) / 2}" y="${TL_CDY + TL_CDH / 2 + 4}" text-anchor="middle" font-size="11" font-weight="600" fill="${col.tx}">${g.code}</text>`); });
+  tlData.fdSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = TL_FDCOL[g.v]; p.push(`<rect x="${xa}" y="${TL_FDY}" width="${w}" height="${TL_FDH}" fill="${col.fill}"/>`); if (w > 70) p.push(`<text x="${(xa + xb) / 2}" y="${TL_FDY + TL_FDH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
+  [['log_l', TL_LLY], ['log_r', TL_LRY], ['side', TL_SY + TL_SH / 2], ['setpoint', TL_SPY + TL_SPH / 2], ['insertion', TL_IAY + TL_IAH / 2], ['code', TL_CDY + TL_CDH / 2], ['feed', TL_FDY + TL_FDH / 2]].forEach(l => p.push(`<text x="${TLX0 - 7}" y="${l[1] + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${l[0]}</text>`));
   TL_SERIES.forEach(s => { if (!tlEnabled[s.key]) return; const ser = tlData.series[s.key]; if (!ser || ser.pts.length < 2) return; const pts = ser.pts.map(o => xF(o.t) + ',' + yF(s, o.v)).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#tlpc)"/>`); });
   tlData.sideSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_VB}" stroke="${TL_TRANS}" stroke-width="1.5" stroke-dasharray="2 3"/>`); });
-  tlData.events.forEach(ev => { if (!inW(ev.t)) return; const x = xF(ev.t); p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_VB}" stroke="${TL_INS}" stroke-width="1.5" stroke-dasharray="4 3"/>`); const ly = ev.side === 'R' ? TL_LRY : TL_LLY; p.push(`<rect x="${x - 3}" y="${ly - 6}" width="6" height="12" rx="1.5" fill="${TL_INS}"/>`); });
+  tlData.events.forEach(ev => {
+    if (!inW(ev.t)) return; const x = xF(ev.t);
+    if (ev.hand) {
+      // Hand-fed log: no magazine side, so it sits between the two log tracks
+      // and its line runs down to the feed lane where the request was shown.
+      p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_FDY + TL_FDH}" stroke="${TL_HAND}" stroke-width="1.5" stroke-dasharray="4 3"/>`);
+      p.push(`<rect x="${x - 5}" y="${TL_GY - 5}" width="10" height="10" fill="${TL_HAND}" transform="rotate(45 ${x} ${TL_GY})"/>`);
+      return;
+    }
+    p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_VB}" stroke="${TL_INS}" stroke-width="1.5" stroke-dasharray="4 3"/>`); const ly = ev.side === 'R' ? TL_LRY : TL_LLY; p.push(`<rect x="${x - 3}" y="${ly - 6}" width="6" height="12" rx="1.5" fill="${TL_INS}"/>`);
+  });
   // Minutes between consecutive logs on EITHER side — the real feed interval.
   // Per-side gaps read ~double this whenever the sides alternate, which is the
   // normal case. tlData.events is already time-sorted and deduped across sides.
@@ -1614,6 +1893,30 @@ function tlDraw() {
   p.push(`<g id="tl-xdots"></g>`);
   p.push(`</svg>`);
   host.innerHTML = p.join('');
+  tlRenderCodes();
+}
+
+// Occurrence count + total time per diag code inside the zoom window, busiest
+// first. A code "occurs" once per run, so 13 flapping on and off shows ×N.
+function tlRenderCodes() {
+  const el = document.getElementById('tl-codes');
+  const a = tlWin.a, b = tlWin.b, agg = new Map();
+  tlData.iaSeg.forEach(g => {
+    const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b);
+    if (e0 < s0) return;
+    const r = agg.get(g.code) || { n: 0, ms: 0, text: g.text };
+    r.n++; r.ms += e0 - s0; agg.set(g.code, r);
+  });
+  if (!agg.size) { el.innerHTML = '<span style="font-size:12px;color:var(--dim)">No diag_code in this window</span>'; return; }
+  const fmtMs = ms => { const m = Math.round(ms / 60000); return m < 60 ? m + ' min' : (m / 60).toFixed(1) + ' h'; };
+  el.innerHTML = Array.from(agg.entries())
+    .sort((x, y) => (x[0] === 0) - (y[0] === 0) || y[1].n - x[1].n || y[1].ms - x[1].ms)
+    .map(([code, r]) => {
+      const col = tlCodeCol(code), text = (DIAG[code] && DIAG[code].text) || r.text || 'Unknown code';
+      return `<span title="${escapeHtml(text)}" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:14px;font-size:12px;background:${col.fill};color:${col.tx}">`
+        + `<b style="font-size:13px">${code}</b><span>×${r.n}</span><span style="opacity:.75">· ${fmtMs(r.ms)}</span>`
+        + `<span style="opacity:.75;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(text)}</span></span>`;
+    }).join('');
 }
 
 function tlHideTT() {
@@ -1679,10 +1982,15 @@ function tlWireOnce() {
     if (ia) {
       const col = ia.on ? TL_IACOL.on : TL_IACOL.off;
       meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">insertion</span><span style="font-weight:600;color:${col.tx}">${col.name}</span></div>`;
+      meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">code</span><span style="font-weight:600;color:${tlCodeCol(ia.code).tx}">${ia.code}</span></div>`;
       if (!ia.on && ia.text) meta += `<div style="color:var(--dim);font-size:10px;margin-top:1px">${escapeHtml(ia.text)}</div>`;
     }
+    const fd = tlSegAt(tlData.fdSeg, near.t);
+    if (fd) meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">feed</span><span style="font-weight:600;color:${TL_FDCOL[fd.v].tx}">${TL_FDCOL[fd.v].name}</span></div>`;
     const evN = tlData.events.filter(ev => Math.abs(ev.t - near.t) <= 20000)[0];
-    const note = evN ? `<div style="margin-top:4px;color:${TL_INS}">insertion · ${TL_SIDECOL[evN.side].name.toLowerCase()}</div>` : '';
+    const note = !evN ? '' : evN.hand
+      ? `<div style="margin-top:4px;color:${TL_HAND}">log added by hand · stove counted it</div>`
+      : `<div style="margin-top:4px;color:${TL_INS}">insertion · ${TL_SIDECOL[evN.side].name.toLowerCase()}</div>`;
     const tt = document.getElementById('tl-tt');
     tt.innerHTML = `<div style="font-weight:600;margin-bottom:4px">${new Date(near.t).toLocaleTimeString()}</div>${rows}<div style="border-top:1px solid var(--border);margin:5px 0 4px"></div>${meta}${note}`;
     tt.style.display = '';

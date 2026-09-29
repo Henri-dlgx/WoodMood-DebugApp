@@ -60,8 +60,17 @@ SELECT
   payload,
   substr(nth(1, tokens(topic, '/')), 9) as device
 FROM
-  "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash"
+  "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash", "+/status/firmware"
 ```
+
+#### About `status/firmware`
+
+The History tab's header shows the stove's firmware version next to its serial.
+Since Sep 2026 firmware no longer puts `fw_version` in `status/full` — the version
+lives only on the retained `status/firmware` topic (published once per MQTT
+connect, so a handful of rows per day). Without `"+/status/firmware"` in the
+`FROM`, History shows **"version not logged"** for current firmware. The
+demo/mainline badge still works either way: it is inferred from `status/full`.
 
 `+` matches any single topic level, so `+/status/full` matches
 `WoodMood<ANYSERIAL>/status/full`. The `device` expression already strips the
