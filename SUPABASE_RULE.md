@@ -222,6 +222,29 @@ the pipe, not the app:
    Headers: apikey: <anon key>   Authorization: Bearer <anon key>
    ```
 
+## Known failure (2026-09-30): every stove logged as JJQF9D
+
+After switching the rule to the wildcard `FROM`, VEWGAX's History stayed empty
+even though the rule showed ~1 msg/s Matched/Passed and >1,000 Action Success.
+The rows **were** being inserted — but the **action's HTTP body** had `device`
+hard-coded to `"JJQF9D"` from the single-stove days, so every stove's rows were
+labelled JJQF9D. Tell: pick JJQF9D in History and you see `WoodMood<OTHER>/…`
+topics.
+
+Fix: in action `a-pb666061-6da21f` → Settings → Body, set `"device": "${device}"`
+(the value the rule SQL computes), never a literal serial. Then relabel the
+mis-tagged rows from their own topic in the Supabase SQL Editor:
+
+```sql
+update logs
+set device = substr(split_part(topic, '/', 1), 9)
+where device is distinct from substr(split_part(topic, '/', 1), 9);
+```
+
+**Lesson:** a rule going multi-stove needs the SQL `FROM` **and** the sink body
+checked — "Action Success" only proves a row was written, not that it was
+labelled right.
+
 ## Known failure (2026-07-07)
 
 After migrating firmware to per-serial auth, the rule SQL had been rewritten to
