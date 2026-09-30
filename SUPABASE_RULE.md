@@ -28,31 +28,7 @@ The app filters by serial with `device=eq.<serial>` (see `fetchHistory()` in
 
 ## The rule SQL
 
-### Current (single stove)
-
-```sql
-SELECT
-  topic,
-  payload,
-  substr(nth(1, tokens(topic, '/')), 9) as device
-FROM
-  "WoodMoodJJQF9D/status/full", "WoodMoodJJQF9D/status/diag", "WoodMoodJJQF9D/status/stats"
-```
-
-> ⚠️ **This `FROM` does not include `status/crash`** (added in firmware v5.2). Crash
-> reports reach the app's live Crash panel over MQTT regardless — that panel reads the
-> retained topic directly — but they will **not** be archived to Supabase, so crash
-> History stays empty until the topic is added below.
-
-How `device` is built:
-- `tokens(topic, '/')` → `["WoodMoodJJQF9D", "status", "full"]`
-- `nth(1, …)` → `"WoodMoodJJQF9D"`  *(EMQX arrays are 1-based)*
-- `substr(…, 9)` → `"JJQF9D"`  *(EMQX `substr` is 1-based; position 9 skips the 8-char `WoodMood` prefix)*
-
-### Recommended (all stoves, auto-capturing)
-
-When you add more stoves, **switch the `FROM` to single-level wildcards** so new
-units are logged automatically without ever touching this rule again:
+### Current (all stoves, wildcard — since 2026-09-30)
 
 ```sql
 SELECT
@@ -63,6 +39,46 @@ FROM
   "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash", "+/status/firmware"
 ```
 
+`+` matches any single topic level, so `+/status/full` matches
+`WoodMood<ANYSERIAL>/status/full`. New stoves are logged automatically — no rule
+edits when a unit is added or renamed.
+
+How `device` is built:
+- `tokens(topic, '/')` → `["WoodMoodJJQF9D", "status", "full"]`
+- `nth(1, …)` → `"WoodMoodJJQF9D"`  *(EMQX arrays are 1-based)*
+- `substr(…, 9)` → `"JJQF9D"`  *(EMQX `substr` is 1-based; position 9 skips the 8-char `WoodMood` prefix)*
+
+**Paste this SQL, hit *SQL Test*, then Save.** After saving, check *Statistics* —
+`Passed` should track `Matched`. See Troubleshooting below if it doesn't.
+
+> **History before 2026-09-30:** the rule used to be hard-coded to
+> `"WoodMoodJJQF9D/status/full", "…/status/diag", "…/status/stats"`, so **only
+> JJQF9D was ever logged**. No other stove has Supabase rows before the switch to
+> wildcards, and crash/firmware rows start from that date too. This was why
+> VEWGAX's History tab showed nothing while JJQF9D's worked.
+
+### How the stoves are kept apart
+
+Every stove writes into the **same** `logs` table; the `device` column is the only
+thing that separates them. The History tab therefore **always** filters by one
+`device=eq.<SERIAL>` — it never fetches an unfiltered mix (which would plot two
+stoves' temperatures as one jagged line). A stove must be picked, or the app must
+be connected to one. The Topic box either takes a suffix (`status/full`, scoped to
+the picked stove) or a full `WoodMood<SERIAL>/…` topic, whose serial wins.
+
+A renamed unit keeps its old rows under its **old** serial (VEWGAX's history stays
+under `VEWGAX`; after reflashing as `TEST001` new rows go under `TEST001`). Both
+serials are in the app's `HIST_STOVES` list — pick whichever era you want.
+
+**Required index.** With several stoves at 1 Hz, filtering by `device` without an
+index scans the whole table and gets slower every day (eventually PostgREST
+times out). Run once in the Supabase **SQL Editor**:
+
+```sql
+create index if not exists logs_device_time_idx on logs (device, received_at);
+create index if not exists logs_topic_time_idx  on logs (topic, received_at);
+```
+
 #### About `status/firmware`
 
 The History tab's header shows the stove's firmware version next to its serial.
@@ -71,14 +87,6 @@ lives only on the retained `status/firmware` topic (published once per MQTT
 connect, so a handful of rows per day). Without `"+/status/firmware"` in the
 `FROM`, History shows **"version not logged"** for current firmware. The
 demo/mainline badge still works either way: it is inferred from `status/full`.
-
-`+` matches any single topic level, so `+/status/full` matches
-`WoodMood<ANYSERIAL>/status/full`. The `device` expression already strips the
-`WoodMood` prefix, so each stove lands under its own serial with no per-stove
-edits.
-
-**Paste this SQL, hit *SQL Test*, then Save.** After saving, check *Statistics* —
-`Passed` should track `Matched`. See Troubleshooting below if it doesn't.
 
 #### About `status/crash` specifically
 
@@ -193,8 +201,9 @@ fall between kept samples. The last hour is unaffected.
 
 1. **Firmware:** set `MQTT_DEVICE_SERIAL` (and, in per-serial mode, `MQTT_DEVICE_SECRET`) in that unit's untracked `Secrets.h` (Arduino lib repo). See `PER_SERIAL_AUTH_GUIDE.md`.
 2. **EMQX Cloud auth:** create the authentication user (username = the serial) and, if the broker is in whitelist mode, the ACL rule allowing `WoodMood<SERIAL>/#`.
-3. **EMQX rule:** nothing to do **if** you're on the wildcard `+/status/...` `FROM` above. If you're still on the hard-coded single-stove `FROM`, append the new topics: `"WoodMood<SERIAL>/status/full", "WoodMood<SERIAL>/status/diag", "WoodMood<SERIAL>/status/stats"`.
-4. **Verify:** connect the app to that serial, open History, Fetch. Or check the rule's **Statistics** panel — `Passed` and `Action → Success` should be climbing.
+3. **EMQX rule:** nothing to do — the wildcard `+/status/...` `FROM` above picks the new serial up automatically.
+4. **Debug App:** add the serial to `HIST_STOVES` in `index.html` so it appears in the History stove picker (until then, connect to the stove and leave the picker on "Connected").
+5. **Verify:** connect the app to that serial, open History, Fetch. Or check the rule's **Statistics** panel — `Passed` and `Action → Success` should be climbing.
 
 ## Troubleshooting: History shows only 0s / empty
 

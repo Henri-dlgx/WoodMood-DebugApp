@@ -250,7 +250,7 @@
       <label class="export-label">Stove</label>
       <select id="hist-stove" onchange="onHistStoveChange()"></select>
       <label class="export-label">Topic</label>
-      <input id="hist-topic" placeholder="blank = the connected stove only" style="width:240px"/>
+      <input id="hist-topic" placeholder="blank = all topics of the selected stove" style="width:240px"/>
       <button class="btn-share" onclick="fetchHistory()">Fetch</button>
       <button class="btn-share" onclick="downloadHistoryCsv()">Download raw CSV</button>
       <button class="btn-share" onclick="downloadHistoryWideCsv()">Download wide CSV (spreadsheet-ready)</button>
@@ -1173,26 +1173,58 @@ let histRows = [];
 let histUnit = { serial: '', fw: { version: '', commit: '', build: '', raw: {} }, asOf: null, sawFull: false, hasFeedManual: false };
 
 // Fleet serials (= the UNIT_* names in HenriLib Secrets.h). Supabase `device` is the bare serial.
-const HIST_STOVES = ['VEWGAX', 'JJQF9D', 'AFNMU3', '87FQ8F', 'MRUNDG', 'C5KA7T'];
+// VEWGAX and TEST001 are the same bench machine before/after the rename — kept apart because
+// Supabase stores each under the serial it was running as at the time.
+const HIST_STOVES = ['JJQF9D', 'VEWGAX', 'TEST001', 'TEST002', 'AFNMU3', '87FQ8F', 'MRUNDG', 'C5KA7T'];
 const HIST_STOVE_LS = 'woodmood_debug_hist_stove';
 
-// '' = follow the connected stove (previous behaviour).
+// Every stove now logs into the same `logs` table, so History always queries ONE serial —
+// never an unfiltered mix, which would interleave two stoves' temperatures in one chart.
+// '' in the selector = follow the connected stove.
 function histStove() {
-  return document.getElementById('hist-stove').value || cfg.serial || '';
+  return (document.getElementById('hist-stove').value || cfg.serial || '').trim().toUpperCase();
+}
+
+function histFollowLabel() {
+  return cfg.serial ? `Connected (${cfg.serial.trim().toUpperCase()})` : '— pick a stove —';
+}
+
+// Topic box accepts a full topic (WoodMoodX/status/full — its serial wins) or just the
+// suffix (status/full), which is scoped to the selected stove.
+function resolveHistQuery() {
+  const raw = document.getElementById('hist-topic').value.trim().replace(/^\/+/, '');
+  const m = /^WoodMood([^/]+)\/.+/.exec(raw);
+  if (m) return { stove: m[1].toUpperCase(), topic: raw };
+  const stove = histStove();
+  return { stove, topic: raw && stove ? `WoodMood${stove}/${raw}` : '' };
 }
 
 function fillHistStoveSelect() {
   const sel = document.getElementById('hist-stove');
   let saved = '';
   try { saved = localStorage.getItem(HIST_STOVE_LS) || ''; } catch (e) {}
-  sel.innerHTML = `<option value="">${cfg.serial ? `Connected (${cfg.serial})` : 'Connected stove / all'}</option>`
+  sel.innerHTML = `<option value="">${histFollowLabel()}</option>`
     + HIST_STOVES.map(s => `<option value="${s}">${s}</option>`).join('');
   sel.value = HIST_STOVES.includes(saved) ? saved : '';
+}
+
+function clearHistory(msg) {
+  histRows = [];
+  histUnit = { serial: histStove(), fw: { version: '', commit: '', build: '', raw: {} }, asOf: null, sawFull: false, hasFeedManual: false };
+  renderUnitBar();
+  renderHistoryTable();
+  analyzeHistory();
+  document.getElementById('hist-info').textContent = msg;
 }
 
 function onHistStoveChange() {
   try { localStorage.setItem(HIST_STOVE_LS, document.getElementById('hist-stove').value); } catch (e) {}
   fillSupabaseForm();
+  // Don't leave the previous stove's rows on screen under the new stove's name.
+  if (histRows.length) {
+    const s = histStove();
+    clearHistory(s ? `Stove changed to ${s} — press Fetch.` : 'Pick a stove, then Fetch.');
+  }
 }
 
 function fillSupabaseForm() {
@@ -1200,12 +1232,12 @@ function fillSupabaseForm() {
   document.getElementById('supa-key').value = supaCfg.key || '';
   const sel = document.getElementById('hist-stove');
   if (!sel.options.length) fillHistStoveSelect();
-  else sel.options[0].textContent = cfg.serial ? `Connected (${cfg.serial})` : 'Connected stove / all';
+  else sel.options[0].textContent = histFollowLabel();
   const stove = histStove();
   const topicEl = document.getElementById('hist-topic');
   topicEl.placeholder = stove
-    ? `blank = ${stove} only, or set an exact topic e.g. WoodMood${stove}/status/full`
-    : 'blank = all topics (pick a stove or connect to one to narrow it)';
+    ? `blank = all of ${stove}, or e.g. status/full`
+    : 'pick a stove first (or type a full WoodMood<serial>/… topic)';
 }
 
 function saveSupabaseConfig() {
@@ -1226,11 +1258,10 @@ async function fetchHistory() {
   if (!supaCfg.url || !supaCfg.key) { alert('Save your Supabase project URL and anon key first.'); return; }
   const info = document.getElementById('hist-info');
   const hours = parseFloat(document.getElementById('hist-hours').value) || 24;
-  const topic = document.getElementById('hist-topic').value.trim();
-  let filter = '';
-  if (topic) filter = `&topic=eq.${encodeURIComponent(topic)}`;
-  const stove = histStove();
-  if (!topic && stove) filter = `&device=eq.${encodeURIComponent(stove)}`;
+  const { stove, topic } = resolveHistQuery();
+  if (!stove) { clearHistory('Pick a stove (or connect to one) — History shows one stove at a time.'); return; }
+  let filter = `&device=eq.${encodeURIComponent(stove)}`;
+  if (topic) filter += `&topic=eq.${encodeURIComponent(topic)}`;
   const headers = { apikey: supaCfg.key, Authorization: `Bearer ${supaCfg.key}` };
   const rows = [];
   let latest = null;
@@ -1246,7 +1277,7 @@ async function fetchHistory() {
       histRows = [];
       histUnit = { serial: stove, fw: { version: '', commit: '', build: '', raw: {} }, asOf: null, sawFull: false, hasFeedManual: false };
       renderUnitBar();
-      info.textContent = 'No rows found in the database' + (topic ? ` for ${topic}` : stove ? ` for device ${stove}` : '') + '.';
+      info.textContent = `No rows found for ${topic || 'device ' + stove}. If this stove is online, its topics are missing from the EMQX rule's FROM — see SUPABASE_RULE.md.`;
       renderHistoryTable();
       analyzeHistory();
       return;
@@ -2008,7 +2039,7 @@ function downloadHistoryCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `woodmood_cloud_history_${histStove() || 'all'}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  a.download = `woodmood_cloud_history_${histUnit.serial || 'unknown'}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -2033,7 +2064,7 @@ function downloadHistoryWideCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `woodmood_wide_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  a.download = `woodmood_wide_${histUnit.serial || 'unknown'}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
