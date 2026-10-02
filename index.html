@@ -260,7 +260,7 @@
 
   <div class="card">
     <h2>Timeline</h2>
-    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp, fan speeds and chip temp overlaid — each scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, and automatic vs manual feeding (with hand-fed logs marked), all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
+    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp, fan speeds and chip temp overlaid — each scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, automatic vs manual feeding (with hand-fed logs marked), and every restart (with its reset reason and any firmware flash, when status/crash and status/firmware are in the fetch), all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
     <div id="tl-empty" class="empty">Fetch data first — the timeline is built from status/full history.</div>
     <div id="tl-body" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
@@ -290,6 +290,9 @@
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(245,166,35,.55)"></span>feed · log requested</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(229,72,77,.55)"></span>feed · request missed</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(138,144,162,.3)"></span>feed · automatic</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px solid #e6e8ee"></span>restart (pill: flash / power / restart)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px solid #ff5c6a"></span>crash / watchdog / brownout restart</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(138,144,162,.35)"></span>offline (no data before a restart)</span>
       </div>
       <div style="margin-top:12px">
         <div style="font-size:12px;color:var(--dim);margin-bottom:6px">Diagnostic codes in the window — how often each came up and for how long (spot the recurring ones)</div>
@@ -1714,6 +1717,15 @@ const TL_FDCOL = {
   missed: { fill: 'rgba(229,72,77,0.36)',   tx: '#ff9ba0', name: 'request missed' },
 };
 const TL_HAND = '#34d399';
+// Restarts. Reset reasons are CrashReporter's resetReasonStr() strings; the
+// "bad" ones (the stove didn't choose to restart) get a red pill.
+const TL_RST = '#e6e8ee', TL_RST_BAD = '#ff5c6a', TL_OFF = 'rgba(138,144,162,0.20)';
+const TL_BOOT = {
+  POWERON: 'power-on', EXT: 'reset pin / USB', SW: 'software reset', PANIC: 'crash',
+  INT_WDT: 'watchdog', TASK_WDT: 'watchdog', WDT: 'watchdog', BROWNOUT: 'brownout',
+  DEEPSLEEP: 'deep sleep', SDIO: 'SDIO', UNKNOWN: 'unknown',
+};
+const TL_BOOT_BAD = new Set(['PANIC', 'INT_WDT', 'TASK_WDT', 'WDT', 'BROWNOUT']);
 const TL_INS = '#e5484d', TL_TRANS = '#bb86fc', TL_AXIS = '#8a90a2', TL_GRID = 'rgba(138,144,162,0.15)', TL_SURF = '#0d0f14';
 // viewBox geometry (the SVG scales to the card width)
 // TL_GY is the gap-pill row. It sits on the midline between the two log tracks
@@ -1824,7 +1836,50 @@ function tlBuild() {
     return 'manual';
   }, tMax);
 
-  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, fdSeg, spMin: spMin - pad, spMax: spMax + pad, fullRows };
+  // Restarts — uptime falls back to ~0 on every boot, so a drop between
+  // consecutive status/full rows is a restart, and t - uptime is when it
+  // happened. The first row counts too when the stove booted right at the start
+  // of the window. status/crash (reset reason) and status/firmware (build) are
+  // published once per boot, so if the Topic filter let them through they say
+  // why: a changed build means it was flashed.
+  const bootRows = { crash: [], fw: [] };
+  histRows.forEach(r => {
+    const p = r.payload;
+    if (!p || typeof p !== 'object') return;
+    const t = new Date(r.received_at).getTime();
+    if (/\/status\/crash$/.test(r.topic)) bootRows.crash.push({ t, p });
+    else if (/\/status\/firmware$/.test(r.topic)) bootRows.fw.push({ t, p });
+  });
+  bootRows.fw.sort((x, y) => x.t - y.t);
+  const fwId = p => (p.commit || '') + '|' + (p.build_date || '');
+  const restarts = [];
+  let prevUp = null, prevT = null;
+  fullRows.forEach(fr => {
+    const up = fr.p.uptime;
+    if (typeof up !== 'number') return;
+    const isBoot = prevUp === null ? up < 120 : up < prevUp;
+    if (isBoot) {
+      const t = fr.t - up * 1000;
+      // Last row the stove published before going down — anything much longer
+      // than the 1 s publish interval was spent offline (power cut, flashing…).
+      const offFrom = prevT !== null && t - prevT > 30000 ? prevT : null;
+      const near = list => list.filter(o => Math.abs(o.t - t) < 120000).sort((x, y) => Math.abs(x.t - t) - Math.abs(y.t - t))[0];
+      const cr = near(bootRows.crash), fw = near(bootRows.fw);
+      let flashed = false;
+      if (fw) {
+        const before = bootRows.fw.filter(o => o.t < fw.t - 1000).pop();
+        flashed = !!before && fwId(before.p) !== fwId(fw.p);
+      }
+      const reason = cr && cr.p.boot ? String(cr.p.boot) : '';
+      restarts.push({
+        t, offFrom, reason, flashed, fw: fw ? fw.p : null,
+        crashed: !!(cr && cr.p.new) || TL_BOOT_BAD.has(reason),
+      });
+    }
+    prevUp = up; prevT = fr.t;
+  });
+
+  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, fdSeg, restarts, spMin: spMin - pad, spMax: spMax + pad, fullRows };
 }
 
 function tlGlobalMax() {
@@ -1839,6 +1894,13 @@ function tlNearestVal(key, t) {
   let near = null, best = Infinity;
   for (const p of ser.pts) { const d = Math.abs(p.t - t); if (d < best) { best = d; near = p; } }
   return near ? near.v : null;
+}
+function tlRestartPill(r) { return r.flashed ? 'flash' : r.crashed ? (TL_BOOT[r.reason] || 'crash') : r.reason === 'POWERON' ? 'power' : 'restart'; }
+function tlRestartText(r) {
+  const parts = [r.reason ? (TL_BOOT[r.reason] || r.reason) : 'restart'];
+  if (r.flashed && r.fw) parts.push(`flashed ${r.fw.branch || '?'}@${r.fw.commit || '?'}`);
+  if (r.offFrom !== null) { const m = Math.round((r.t - r.offFrom) / 60000); parts.push(`offline ${m < 1 ? '<1' : m} min`); }
+  return parts.join(' · ');
 }
 function tlSegAt(segs, t) { for (const g of segs) { if (t >= g.start && t <= g.end) return g; } return segs.length ? segs[segs.length - 1] : null; }
 
@@ -1888,6 +1950,7 @@ function tlDraw() {
   [0, .25, .5, .75, 1].forEach(f => { const y = TLY1 - f * TLH; p.push(`<line x1="${TLX0}" y1="${y}" x2="${TLX0 + TLW}" y2="${y}" stroke="${TL_GRID}"/>`); p.push(`<text x="${TLX0 - 7}" y="${y + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${tlNorm ? Math.round(f * 100) + '%' : Math.round(f * gmax)}</text>`); });
   const ticks = 6;
   for (let i = 0; i <= ticks; i++) { const t = a + span * i / ticks, x = TLX0 + TLW * i / ticks; p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TLY1}" stroke="${TL_GRID}"/>`); p.push(`<text x="${x}" y="${TLY1 + 12}" text-anchor="${i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}" font-size="10" fill="${TL_AXIS}">${tlClock(t)}</text>`); }
+  tlData.restarts.forEach(r => { if (r.offFrom === null) return; const s0 = Math.max(r.offFrom, a), e0 = Math.min(r.t, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0); p.push(`<rect x="${xa}" y="${TLY0}" width="${xb - xa}" height="${TL_FDY + TL_FDH - TLY0}" fill="${TL_OFF}"/>`); if (xb - xa > 44) p.push(`<text x="${(xa + xb) / 2}" y="${TLY1 - 6}" text-anchor="middle" font-size="10" fill="${TL_AXIS}">offline</text>`); });
   tlData.sideSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), col = TL_SIDECOL[g.v]; p.push(`<rect x="${xa}" y="${TL_SY}" width="${xb - xa}" height="${TL_SH}" fill="${col.fill}"/>`); if (xb - xa > 46) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SY + TL_SH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
   tlData.spSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = TL_SPCOL[g.mode] || TL_SPCOL.fixed; p.push(`<rect x="${xa}" y="${TL_SPY}" width="${w}" height="${TL_SPH}" fill="${col.band}"/>`); const frac = Math.max(0, Math.min(1, (g.sp - tlData.spMin) / ((tlData.spMax - tlData.spMin) || 1))), lh = frac * TL_SPH; p.push(`<rect x="${xa}" y="${TL_SPY + TL_SPH - lh}" width="${w}" height="${lh}" fill="${col.lvl}"/>`); if (w > 26) { p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 14}" text-anchor="middle" font-size="12" fill="${col.tx}">${Math.round(g.sp)}°</text>`); if (w > 66) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 26}" text-anchor="middle" font-size="9" fill="${col.tx}">${col.name}</text>`); } });
   tlData.spSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TL_SPY - 3}" x2="${x}" y2="${TL_SPY + TL_SPH + 3}" stroke="${TL_AXIS}" stroke-dasharray="1 3"/>`); });
@@ -1920,6 +1983,22 @@ function tlDraw() {
     p.push(`<rect x="${x - w / 2}" y="${TL_GY - 8}" width="${w}" height="16" rx="8" fill="${TL_SURF}" stroke="${TL_INS}"/>`);
     p.push(`<text x="${x}" y="${TL_GY + 3.5}" text-anchor="middle" font-size="10" fill="${TL_INS}">${gap}</text>`);
   }
+  // Restarts on top of everything: a solid line through every lane (the diag
+  // code and feed lanes usually change right at a boot) plus a pill saying why.
+  // Restarts often come in bursts (flash, power-cycle, flash again), so a pill
+  // that would overlap the previous one drops to the next free row.
+  const rowEnd = [-Infinity, -Infinity, -Infinity];
+  tlData.restarts.forEach(r => {
+    if (!inW(r.t)) return;
+    const x = xF(r.t), col = r.crashed ? TL_RST_BAD : TL_RST, lbl = '↻ ' + tlRestartPill(r), w = lbl.length * 6 + 12;
+    let row = rowEnd.findIndex(e => x - w / 2 > e + 3);
+    if (row < 0) row = rowEnd.indexOf(Math.min(...rowEnd));
+    rowEnd[row] = x + w / 2;
+    const py = TLY0 + 2 + row * 18;
+    p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_FDY + TL_FDH}" stroke="${col}" stroke-width="1.5"/>`);
+    p.push(`<rect x="${x - w / 2}" y="${py}" width="${w}" height="15" rx="7.5" fill="${TL_SURF}" stroke="${col}"/>`);
+    p.push(`<text x="${x}" y="${py + 11}" text-anchor="middle" font-size="10" font-weight="600" fill="${col}">${lbl}</text>`);
+  });
   p.push(`<line id="tl-xh" x1="0" y1="${TLY0}" x2="0" y2="${TLY1}" stroke="${TL_AXIS}" stroke-dasharray="3 3" style="display:none"/>`);
   p.push(`<g id="tl-xdots"></g>`);
   p.push(`</svg>`);
@@ -2019,9 +2098,13 @@ function tlWireOnce() {
     const fd = tlSegAt(tlData.fdSeg, near.t);
     if (fd) meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">feed</span><span style="font-weight:600;color:${TL_FDCOL[fd.v].tx}">${TL_FDCOL[fd.v].name}</span></div>`;
     const evN = tlData.events.filter(ev => Math.abs(ev.t - near.t) <= 20000)[0];
-    const note = !evN ? '' : evN.hand
+    let note = !evN ? '' : evN.hand
       ? `<div style="margin-top:4px;color:${TL_HAND}">log added by hand · stove counted it</div>`
       : `<div style="margin-top:4px;color:${TL_INS}">insertion · ${TL_SIDECOL[evN.side].name.toLowerCase()}</div>`;
+    // Within ~2 % of the window (min 30 s) so the marker is hoverable when zoomed out.
+    const rsTol = Math.max(30000, (b - a) * 0.02);
+    const rsN = tlData.restarts.filter(r => Math.abs(r.t - t) <= rsTol).sort((x, y) => Math.abs(x.t - t) - Math.abs(y.t - t))[0];
+    if (rsN) note += `<div style="margin-top:4px;color:${rsN.crashed ? TL_RST_BAD : TL_RST}">↻ restarted ${new Date(rsN.t).toLocaleTimeString()} · ${escapeHtml(tlRestartText(rsN))}</div>`;
     const tt = document.getElementById('tl-tt');
     tt.innerHTML = `<div style="font-weight:600;margin-bottom:4px">${new Date(near.t).toLocaleTimeString()}</div>${rows}<div style="border-top:1px solid var(--border);margin:5px 0 4px"></div>${meta}${note}`;
     tt.style.display = '';
