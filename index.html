@@ -260,7 +260,7 @@
 
   <div class="card">
     <h2>Timeline</h2>
-    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp, fan speeds and chip temp overlaid — each scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, automatic vs manual feeding (with hand-fed logs marked), and every restart (with its reset reason and any firmware flash, when status/crash and status/firmware are in the fetch), all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
+    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp with its setpoint as a red line on the same scale, fan speeds and chip temp overlaid — each otherwise scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, automatic vs manual feeding (with hand-fed logs marked), and every restart (with its reset reason and any firmware flash, when status/crash and status/firmware are in the fetch), all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
     <div id="tl-empty" class="empty">Fetch data first — the timeline is built from status/full history.</div>
     <div id="tl-body" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
@@ -278,6 +278,7 @@
         <div id="tl-tt" style="position:absolute;top:0;left:0;display:none;pointer-events:none;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:7px 9px;font-size:11px;line-height:1.55;min-width:150px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:5"></div>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;font-size:11px;color:var(--dim)">
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px solid #ff3b3b"></span>setpoint (same scale as stove_temp)</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px dashed #e5484d"></span>insertion</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px dashed #bb86fc"></span>side switch</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:17px;height:14px;border-radius:7px;border:1px solid #e5484d;color:#e5484d;font-size:9px">40</span>min between logs (either side)</span>
@@ -1679,6 +1680,8 @@ function renderBinaryChart() {
 // ============================================================
 const TL_SERIES = [
   { key: 'stove_temp',  label: 'stove_temp',  unit: '°C', color: '#f5a623' },
+  // Target the stove regulates to — drawn as a step line on stove_temp's own scale.
+  { key: 'setpoint',    label: 'setpoint',    unit: '°C', color: '#ff3b3b', step: true },
   { key: 'fan_main',    label: 'fan_main',    unit: '%',       color: '#4a9eff' },
   { key: 'fan_cooling', label: 'fan_cooling', unit: '%',       color: '#00bcd4' },
   { key: 'room_temp',   label: 'room_temp',   unit: '°C', color: '#ff6fae' },
@@ -1736,7 +1739,7 @@ const TLX0 = 50, TLW = 900, TLY0 = 12, TLH = 170, TLY1 = 182,
       TL_IAY = 310, TL_IAH = 24, TL_CDY = 340, TL_CDH = 22, TL_FDY = 368, TL_FDH = 22,
       TL_VBH = 398, TL_VB = TL_SY + TL_SH;
 
-let tlEnabled = { stove_temp: true, fan_main: true, fan_cooling: true, room_temp: false, chip_temp: true };
+let tlEnabled = { stove_temp: true, setpoint: true, fan_main: true, fan_cooling: true, room_temp: false, chip_temp: true };
 let tlNorm = true;
 let tlData = null;   // computed model (see tlBuild)
 let tlWin = null;    // current zoom window {a,b} in ms
@@ -1786,8 +1789,27 @@ function tlBuild() {
       raw.push({ t: fr.t, v });
       if (v < mn) mn = v; if (v > mx) mx = v;
     });
-    series[s.key] = { pts: downsample(raw, 1500), min: mn, max: mx };
+    // Step series keep only the change points (held value, then new value at
+    // the same instant) — downsampling would turn the steps into ramps.
+    let pts = raw;
+    if (s.step) {
+      pts = [];
+      raw.forEach((o, i) => {
+        const prev = pts[pts.length - 1];
+        if (!prev) { pts.push(o); return; }
+        if (o.v !== prev.v) { pts.push({ t: o.t, v: prev.v }, o); return; }
+        if (i === raw.length - 1) pts.push(o);
+      });
+    } else pts = downsample(raw, 1500);
+    series[s.key] = { pts, min: mn, max: mx };
   });
+  // setpoint shares stove_temp's scale, so in "own range" mode both are
+  // normalised to the union of their ranges and the line sits where it should.
+  const st = series.stove_temp, sp = series.setpoint;
+  if (st && sp && isFinite(st.max) && isFinite(sp.max)) {
+    st.min = sp.min = Math.min(st.min, sp.min);
+    st.max = sp.max = Math.max(st.max, sp.max);
+  }
 
   // insertion events — reconstruct the true insert time from last_insert_ago_sec,
   // then dedupe the cluster of rows that all point back to the same insert.
