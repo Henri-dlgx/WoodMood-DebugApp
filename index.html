@@ -101,6 +101,54 @@
   .ubadge.mainline{border-color:var(--green);color:var(--green);background:rgba(46,204,113,.1)}
   .ubadge .ctx{font-size:10px;color:var(--dim);font-weight:400}
 
+  /* switch & sensor check (status/inputs + status/usb_mode) */
+  .inp-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .inp-head h2{margin:0}
+  .usb-badge{border-radius:12px;padding:3px 10px;font-size:12px;font-weight:600;border:1px solid var(--border);color:var(--dim)}
+  .usb-badge.armed{border-color:var(--green);color:var(--green);background:rgba(46,204,113,.1)}
+  .usb-badge.usb{border-color:var(--amber);color:var(--amber);background:rgba(245,166,35,.1)}
+  .inp-sum{display:flex;align-items:center;gap:14px;background:#0d0f14;border-radius:8px;padding:12px 14px;margin-bottom:12px}
+  .inp-sum .big{font-size:26px;font-weight:700;white-space:nowrap}
+  .inp-sum .big small{font-size:13px;color:var(--dim);font-weight:400}
+  .inp-sum .rest{flex:1;min-width:0}
+  .inp-bar{height:8px;border-radius:4px;background:#232733;overflow:hidden;margin-bottom:6px}
+  .inp-bar div{height:100%;background:var(--amber);transition:width .4s}
+  .inp-sum.done .inp-bar div{background:var(--green)}
+  .inp-sum.done .big{color:var(--green)}
+  .inp-todo{font-size:12px;color:var(--dim);line-height:1.5}
+  .inp-todo b{color:var(--text);font-weight:600}
+  .inp-groups{display:grid;grid-template-columns:.8fr 1fr 1fr;gap:12px}
+  @media (max-width:800px){.inp-groups{grid-template-columns:1fr}}
+  .inp-group h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:0 0 6px;display:flex;justify-content:space-between}
+  .inp-tile{display:grid;grid-template-columns:30px 1fr auto;align-items:center;gap:8px;background:#0d0f14;border:1px solid transparent;border-radius:8px;padding:8px 10px;margin-bottom:6px}
+  .inp-mark{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;border:2px solid #3a3f4b;color:#3a3f4b}
+  .inp-tile.seen{border-color:rgba(46,204,113,.35)}
+  .inp-tile.seen .inp-mark{background:var(--green);border-color:var(--green);color:#0f1115}
+  .inp-tile.todo .inp-mark{border-color:var(--amber);color:var(--amber);border-style:dashed}
+  .inp-tile.na{opacity:.55}
+  .inp-tile.na .inp-mark{border-color:#3a3f4b;color:var(--dim)}
+  .inp-name{font-size:13px;font-weight:600}
+  .inp-sub{font-size:11px;color:var(--dim)}
+  .inp-live{font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px;white-space:nowrap}
+  .inp-live .ldot{width:8px;height:8px;border-radius:50%;background:#3a3f4b}
+  .inp-live.on{color:var(--blue);font-weight:600}
+  .inp-live.on .ldot{background:var(--blue);box-shadow:0 0 0 3px rgba(74,158,255,.25)}
+  .inp-tile.just{animation:inpflash 1.6s ease-out}
+  @keyframes inpflash{0%{background:rgba(46,204,113,.45)}100%{background:#0d0f14}}
+  .inp-foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--dim)}
+  .inp-raw{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;letter-spacing:.06em;background:#0a0c10;border-radius:6px;padding:4px 8px;color:var(--text)}
+  .inp-raw .b1{color:var(--green)} .inp-raw .b0{color:var(--amber)} .inp-raw .bx{color:#555b6a} .inp-raw .sep{color:#555b6a}
+  .inp-strip{display:inline-flex;gap:2px;align-items:center;vertical-align:middle}
+  .inp-strip i{display:inline-block;width:11px;height:14px;border-radius:2px;background:#3a3f4b}
+  .inp-strip i.s1{background:var(--green)} .inp-strip i.s0{background:transparent;border:1px dashed var(--amber)} .inp-strip i.sx{background:#232733}
+  .inp-strip .gap{width:6px}
+  .sess-row{display:grid;grid-template-columns:150px 70px 64px auto 1fr;gap:10px;align-items:center;padding:7px 8px;border-radius:6px;cursor:pointer;font-size:12px}
+  .sess-row:hover{background:#0d0f14}
+  .sess-row.sel{background:rgba(74,158,255,.12);outline:1px solid rgba(74,158,255,.5)}
+  .sess-row .ok{color:var(--green);font-weight:700} .sess-row .part{color:var(--amber);font-weight:700}
+  .sess-row .miss{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  @media (max-width:800px){.sess-row{grid-template-columns:1fr auto auto}.sess-row .miss,.sess-row .dur{display:none}}
+
   .feed-events{margin-top:10px;font-size:12px}
   .feed-events .log-row{border-bottom:1px solid #191c22}
 </style>
@@ -173,6 +221,15 @@
       <h2>Fault</h2>
       <div class="grid" id="fault-grid"><div class="empty">No data yet</div></div>
     </div>
+  </div>
+
+  <div class="card" id="inp-card">
+    <div class="inp-head">
+      <h2>Switch &amp; Sensor Check</h2>
+      <span class="usb-badge" id="usb-badge">USB mode: —</span>
+    </div>
+    <div id="inp-body"><div class="empty">Waiting for status/inputs…</div></div>
+    <div class="share-note">Build check: open every door and press every button once — each tile turns green the first time the stove sees it, and stays green until you start a fresh check (or the stove reboots). The blue “now” tag is what the input reads this second, so a tile that is green <i>and</i> permanently blue may be stuck rather than tested. Grey tiles can't be read on this build: forward end switches are off during USB mode, trapdoor sensors are not compiled in.</div>
   </div>
 
   <div class="card">
@@ -303,6 +360,16 @@
   </div>
 
   <div class="card">
+    <h2>Switch &amp; Sensor Check — History</h2>
+    <div class="share-note" style="margin-top:0;margin-bottom:10px">Each <b>check session</b> runs from a reset (or a reboot) to the next. The strip shows its final result — Main | Right | Left, green = tested, dashed = never seen, dark = not readable. Click a session to see, below, exactly when each input was active (blue bars) and when it was first seen (green tick). The USB lane shows when the forward end switches were off for USB mode.</div>
+    <div id="ih-empty" class="empty">Fetch data first — built from status/inputs and status/usb_mode history.</div>
+    <div id="ih-body" style="display:none">
+      <div id="ih-sessions" style="max-height:260px;overflow-y:auto;margin-bottom:12px"></div>
+      <div id="ih-lanes"></div>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Numeric Fields to Plot</h2>
     <div class="share-row" style="margin-top:0">
       <button class="btn-share" onclick="setAllFieldChecks('numeric', true)">Select all</button>
@@ -409,7 +476,261 @@ let reloadReqRetained = false; // true = came from a retained replay, age is a l
 let prevInsert = null;         // { ever, agoSec, at } from the previous status/full
 let lastInsertKind = null;     // 'hand' | 'machine' — only known for inserts seen this session
 let feedEvents = [];
+let inputs = null;             // parsed status/inputs  { bits, live, since_s, ... }
+let inputsAt = 0;              // Date.now() when it arrived
+let inputsRetained = false;    // retained replay → since_s is only a lower bound for "running for"
+let inputsPrevBits = '';       // to flash tiles that just turned green
+let inputsWaitTimer = null;
+let usbMode = null;            // parsed status/usb_mode { on, left_min }
+let usbModeAt = 0;
 let liveSerial = null;         // serial the per-stove state above belongs to           // [{ t, kind }] hand-fed logs / machine inserts seen this session
+
+// ============================================================
+// SWITCH & SENSOR CHECK — status/inputs (InputLatch.h) + status/usb_mode
+// bits/live = "MM|RRRRR|LLLLL"; each char '1' seen/active, '0' not, 'x' unreadable.
+// ============================================================
+const INP = [
+  { g: 'main',  name: 'Main door',         on: 'open',    off: 'closed'   },
+  { g: 'main',  name: 'Top button',        on: 'pressed', off: 'released', note: 'maintenance' },
+  { g: 'right', name: 'Loading door',      on: 'open',    off: 'closed'   },
+  { g: 'right', name: 'Blockage button',   on: 'pressed', off: 'released' },
+  { g: 'right', name: 'Home end switch',   on: 'pressed', off: 'released' },
+  { g: 'right', name: 'Forward end switch',on: 'pressed', off: 'released' },
+  { g: 'right', name: 'Trapdoor sensor',   on: 'closed',  off: 'open'     },
+  { g: 'left',  name: 'Loading door',      on: 'open',    off: 'closed'   },
+  { g: 'left',  name: 'Blockage button',   on: 'pressed', off: 'released' },
+  { g: 'left',  name: 'Home end switch',   on: 'pressed', off: 'released' },
+  { g: 'left',  name: 'Forward end switch',on: 'pressed', off: 'released' },
+  { g: 'left',  name: 'Trapdoor sensor',   on: 'closed',  off: 'open'     },
+];
+const INP_GROUPS = [['main', 'Main'], ['right', 'Right'], ['left', 'Left']];
+const INP_SHORT = { main: 'Main', right: 'R', left: 'L' };
+
+function inpChars(s) { return String(s || '').replace(/\|/g, '').split(''); }
+function inpLabel(i) { const d = INP[i]; return (d.g === 'main' ? '' : INP_SHORT[d.g] + ' ') + d.name.toLowerCase(); }
+
+function inpNaReason(i, usbOn) {
+  const n = INP[i].name;
+  if (n === 'Forward end switch') return usbOn ? 'off — USB mode' : 'not armed';
+  if (n === 'Trapdoor sensor')    return 'not in this build';
+  if (n === 'Loading door')       return 'sensors not in this build';
+  return 'not readable';
+}
+
+function inpRawHtml(s) {
+  return String(s || '').split('').map(c =>
+    c === '|' ? '<span class="sep">|</span>' : `<span class="b${c === '1' ? 1 : c === '0' ? 0 : 'x'}">${c}</span>`).join('');
+}
+
+function inpStripHtml(bits) {
+  const c = inpChars(bits);
+  return '<span class="inp-strip">' + c.map((ch, i) =>
+    (i === 2 || i === 7 ? '<span class="gap"></span>' : '') +
+    `<i class="s${ch === '1' ? 1 : ch === '0' ? 0 : 'x'}" title="${inpLabel(i)}: ${ch === '1' ? 'tested' : ch === '0' ? 'never seen' : 'not readable'}"></i>`).join('') + '</span>';
+}
+
+function inpTally(bits) {
+  const c = inpChars(bits);
+  const readable = c.filter(x => x !== 'x').length, seen = c.filter(x => x === '1').length;
+  const missing = c.map((x, i) => x === '0' ? inpLabel(i) : null).filter(Boolean);
+  return { readable, seen, missing };
+}
+
+function usbLeftMin() {
+  if (!usbMode || !usbMode.on) return 0;
+  return Math.max(0, (usbMode.left_min || 0) - Math.floor((Date.now() - usbModeAt) / 60000));
+}
+
+function renderInputs(unsupported) {
+  const body = document.getElementById('inp-body');
+  if (!inputs) {
+    body.innerHTML = `<div class="empty">${unsupported
+      ? 'This stove isn\'t publishing status/inputs — its firmware predates the switch check (needs WM-code-demo main ≥ b0bcaf5).'
+      : 'Waiting for status/inputs…'}</div>`;
+    renderInputsTime();
+    return;
+  }
+  const latched = inpChars(inputs.bits), live = inpChars(inputs.live);
+  const prev = inpChars(inputsPrevBits);
+  const usbOn = !!(usbMode && usbMode.on);
+  const t = inpTally(inputs.bits);
+  const done = t.readable > 0 && t.seen === t.readable;
+  const pct = t.readable ? Math.round(t.seen / t.readable * 100) : 0;
+
+  let h = `<div class="inp-sum${done ? ' done' : ''}">
+      <div class="big">${t.seen} <small>/ ${t.readable} tested</small></div>
+      <div class="rest">
+        <div class="inp-bar"><div style="width:${pct}%"></div></div>
+        <div class="inp-todo">${done ? '<b>All readable inputs have been seen working ✓</b>'
+          : 'Still to test: <b>' + t.missing.join('</b>, <b>') + '</b>'}</div>
+      </div>
+    </div><div class="inp-groups">`;
+  INP_GROUPS.forEach(([g, title]) => {
+    const idx = INP.map((d, i) => d.g === g ? i : -1).filter(i => i >= 0);
+    const gs = idx.filter(i => latched[i] === '1').length, gr = idx.filter(i => latched[i] !== 'x').length;
+    h += `<div class="inp-group"><h3><span>${title}</span><span>${gs}/${gr}</span></h3>`;
+    idx.forEach(i => {
+      const L = latched[i], V = live[i], d = INP[i];
+      const cls = L === '1' ? 'seen' : L === 'x' ? 'na' : 'todo';
+      const just = L === '1' && prev.length && prev[i] !== '1' ? ' just' : '';
+      const mark = L === '1' ? '✓' : L === 'x' ? '–' : '';
+      const sub = L === '1' ? 'tested' : L === 'x' ? inpNaReason(i, usbOn) : 'not seen yet';
+      const liveHtml = V === 'x' ? '' :
+        `<div class="inp-live${V === '1' ? ' on' : ''}"><span class="ldot"></span>${V === '1' ? 'now ' + d.on : d.off}</div>`;
+      h += `<div class="inp-tile ${cls}${just}"><div class="inp-mark">${mark}</div>
+          <div><div class="inp-name">${d.name}${d.note ? ` <span class="inp-sub">(${d.note})</span>` : ''}</div><div class="inp-sub">${sub}</div></div>${liveHtml}</div>`;
+    });
+    h += '</div>';
+  });
+  h += `</div><div class="inp-foot">
+      <span class="inp-raw" title="Main | Right | Left — door, blockage, home, forward, trapdoor">${inpRawHtml(inputs.bits)}</span>
+      <span id="inp-age"></span>
+      <button class="btn-share" style="margin-left:auto" onclick="resetInputsCheck()">Start a fresh check</button>
+    </div>`;
+  body.innerHTML = h;
+  inputsPrevBits = inputs.bits;
+  renderInputsTime();
+}
+
+function renderInputsTime() {
+  const b = document.getElementById('usb-badge');
+  if (!usbMode) { b.className = 'usb-badge'; b.textContent = 'USB mode: —'; }
+  else if (usbMode.on) {
+    const m = usbLeftMin();
+    b.className = 'usb-badge usb';
+    b.textContent = `USB mode — fwd switches OFF · ${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min left`;
+  } else { b.className = 'usb-badge armed'; b.textContent = 'Forward switches armed'; }
+  const a = document.getElementById('inp-age');
+  if (a && inputs) {
+    const sec = (inputs.since_s || 0) + Math.floor((Date.now() - inputsAt) / 1000);
+    a.textContent = `Check running for ${inputsRetained ? 'at least ' : ''}${formatDuration(sec)}`;
+  }
+}
+
+function resetInputsCheck() {
+  if (!client || !client.connected) { alert('Connect to a stove first.'); return; }
+  if (!confirm('Clear every tile and start a fresh switch check on ' + cfg.serial + '?')) return;
+  client.publish(prefix + '/cmd/inputs_reset', '1');
+}
+
+// ---- History: sessions + activity lanes -------------------------------------
+let ihSessions = [];   // [{ start, end, rows:[{t, bits, live}] }]
+let ihSel = -1;
+let ihUsb = [];        // [{ t, on }]
+
+function ihPayload(r) { return typeof r.payload === 'string' ? (() => { try { return JSON.parse(r.payload); } catch (e) { return null; } })() : r.payload; }
+
+function renderInputsHistory() {
+  const rows = [];
+  ihUsb = [];
+  histRows.forEach(r => {
+    const t = new Date(r.received_at).getTime();
+    if (/\/status\/inputs$/.test(r.topic)) { const p = ihPayload(r); if (p && p.bits) rows.push({ t, bits: p.bits, live: p.live || '', since: p.since_s || 0 }); }
+    else if (/\/status\/usb_mode$/.test(r.topic)) { const p = ihPayload(r); if (p) ihUsb.push({ t, on: !!p.on }); }
+  });
+  ihSessions = [];
+  let cur = null;
+  rows.forEach(r => {
+    // since_s going backwards = reset or reboot = a new check session.
+    if (!cur || r.since < cur.lastSince) {
+      cur = { start: r.t - r.since * 1000, end: r.t, rows: [] };
+      ihSessions.push(cur);
+    }
+    cur.rows.push(r); cur.end = r.t; cur.lastSince = r.since;
+  });
+  const empty = document.getElementById('ih-empty'), body = document.getElementById('ih-body');
+  if (!ihSessions.length) {
+    empty.style.display = '';
+    empty.textContent = histRows.length
+      ? 'No status/inputs rows in this range — add "+/status/inputs" and "+/status/usb_mode" to the EMQX rule\'s FROM (see SUPABASE_RULE.md), and flash firmware ≥ b0bcaf5.'
+      : 'Fetch data first — built from status/inputs and status/usb_mode history.';
+    body.style.display = 'none';
+    return;
+  }
+  // Each session ends where the next one starts (or at the end of the fetch).
+  const tEnd = histRows.length ? new Date(histRows[histRows.length - 1].received_at).getTime() : Date.now();
+  ihSessions.forEach((s, i) => { s.until = i + 1 < ihSessions.length ? ihSessions[i + 1].rows[0].t : tEnd; });
+  empty.style.display = 'none'; body.style.display = '';
+  ihSel = ihSessions.length - 1;
+  ihRenderSessions();
+  ihRenderLanes();
+}
+
+function ihRenderSessions() {
+  const el = document.getElementById('ih-sessions');
+  el.innerHTML = ihSessions.map((s, i) => {
+    const last = s.rows[s.rows.length - 1], t = inpTally(last.bits);
+    const ok = t.readable && t.seen === t.readable;
+    return `<div class="sess-row${i === ihSel ? ' sel' : ''}" onclick="ihSel=${i};ihRenderSessions();ihRenderLanes()">
+        <span>${new Date(s.start).toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+        <span class="dur">${formatDuration(Math.round((s.until - s.start) / 1000))}</span>
+        <span class="${ok ? 'ok' : 'part'}">${t.seen}/${t.readable}${ok ? ' ✓' : ''}</span>
+        ${inpStripHtml(last.bits)}
+        <span class="miss">${ok ? 'all tested' : 'missing: ' + t.missing.join(', ')}</span>
+      </div>`;
+  }).reverse().join('');
+}
+
+function ihRenderLanes() {
+  const s = ihSessions[ihSel]; if (!s) return;
+  const a = s.start, b = Math.max(s.until, a + 1000), span = b - a;
+  const X0 = 150, W = 760, LH = 18, TOP = 8;
+  const x = t => X0 + (Math.max(a, Math.min(b, t)) - a) / span * W;
+  const lanes = INP.length + 1;   // + USB lane
+  const H = TOP + lanes * LH + 24 + 12;   // +gaps between groups
+  const y = i => TOP + i * LH + (i >= 2 ? 6 : 0) + (i >= 7 ? 6 : 0) + (i >= 12 ? 6 : 0);
+  const p = [`<svg viewBox="0 0 960 ${H}" width="100%" style="display:block;font-family:inherit">`];
+  for (let k = 0; k <= 6; k++) {
+    const tx = X0 + W * k / 6, tt = a + span * k / 6;
+    p.push(`<line x1="${tx}" y1="${TOP - 4}" x2="${tx}" y2="${H - 16}" stroke="#232733"/>`);
+    p.push(`<text x="${tx}" y="${H - 4}" font-size="10" fill="#8a90a2" text-anchor="${k === 0 ? 'start' : k === 6 ? 'end' : 'middle'}">${tlClock(tt)}</text>`);
+  }
+  INP.forEach((d, i) => {
+    const yy = y(i);
+    p.push(`<text x="${X0 - 8}" y="${yy + 12}" font-size="11" fill="#c2c7d4" text-anchor="end">${(d.g === 'main' ? 'Main' : INP_SHORT[d.g]) + ' · ' + d.name}</text>`);
+    p.push(`<rect x="${X0}" y="${yy + 3}" width="${W}" height="${LH - 6}" rx="3" fill="#0d0f14"/>`);
+    let firstSeen = null, prevL = '0';
+    s.rows.forEach((r, k) => {
+      const L = inpChars(r.bits)[i], V = inpChars(r.live)[i];
+      const t1 = k + 1 < s.rows.length ? s.rows[k + 1].t : s.until;
+      if (V === 'x' || L === 'x') {
+        p.push(`<rect x="${x(r.t)}" y="${yy + 3}" width="${Math.max(0, x(t1) - x(r.t))}" height="${LH - 6}" fill="#2a2e3a"><title>not readable</title></rect>`);
+      } else if (V === '1') {
+        p.push(`<rect x="${x(r.t)}" y="${yy + 4}" width="${Math.max(2, x(t1) - x(r.t))}" height="${LH - 8}" rx="2" fill="#4a9eff"><title>${d.name} ${d.on}: ${tlClock(r.t)} → ${tlClock(t1)}</title></rect>`);
+      }
+      if (L === '1' && prevL !== '1' && firstSeen === null) firstSeen = r.t;
+      prevL = L;
+    });
+    if (firstSeen !== null) {
+      const fx = x(firstSeen);
+      p.push(`<path d="M${fx - 4} ${yy + 9} l3 3 l6 -7" stroke="#2ecc71" stroke-width="2.2" fill="none"><title>first seen ${new Date(firstSeen).toLocaleTimeString()}</title></path>`);
+    } else {
+      const lastL = inpChars(s.rows[s.rows.length - 1].bits)[i];
+      p.push(`<text x="${X0 + W + 6}" y="${yy + 12}" font-size="10" fill="${lastL === 'x' ? '#555b6a' : '#f5a623'}">${lastL === 'x' ? 'n/a' : 'never'}</text>`);
+    }
+  });
+  // USB-mode lane: state carried in from before the session, then each change.
+  const yu = y(INP.length);
+  p.push(`<text x="${X0 - 8}" y="${yu + 12}" font-size="11" fill="#f7c477" text-anchor="end">USB mode</text>`);
+  p.push(`<rect x="${X0}" y="${yu + 3}" width="${W}" height="${LH - 6}" rx="3" fill="#0d0f14"/>`);
+  let on = null, from = a;
+  ihUsb.forEach(u => {
+    if (u.t <= a) { on = u.on; return; }
+    if (u.t >= b) return;
+    if (on) p.push(`<rect x="${x(from)}" y="${yu + 4}" width="${Math.max(2, x(u.t) - x(from))}" height="${LH - 8}" rx="2" fill="#f5a623"><title>USB mode (fwd switches off)</title></rect>`);
+    on = u.on; from = u.t;
+  });
+  if (on) p.push(`<rect x="${x(from)}" y="${yu + 4}" width="${Math.max(2, x(b) - x(from))}" height="${LH - 8}" rx="2" fill="#f5a623"><title>USB mode (fwd switches off)</title></rect>`);
+  if (on === null && !ihUsb.length) p.push(`<text x="${X0 + 8}" y="${yu + 12}" font-size="10" fill="#555b6a">no status/usb_mode rows</text>`);
+  p.push('</svg>');
+  p.push(`<div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:6px;font-size:11px;color:var(--dim)">
+    <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:8px;border-radius:2px;background:#4a9eff"></span>input active (door open / button pressed)</span>
+    <span style="display:inline-flex;align-items:center;gap:6px"><span style="color:#2ecc71;font-weight:700">✓</span>first seen this session</span>
+    <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:8px;border-radius:2px;background:#2a2e3a"></span>not readable</span>
+    <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:8px;border-radius:2px;background:#f5a623"></span>USB mode</span>
+    <span>Very short presses between two publishes may show only as a ✓, not a bar.</span></div>`);
+  document.getElementById('ih-lanes').innerHTML = p.join('');
+}
 
 // ============================================================
 // HISTORY RECORDING (for CSV export)
@@ -503,6 +824,7 @@ function renderUnitBar() {
 // LIVE CLOCK / LAST-INSERTION TICKER
 // ============================================================
 function tickClock() {
+  if (inputs || usbMode) renderInputsTime();
   document.getElementById('li-time').textContent =
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
@@ -698,7 +1020,12 @@ function connect() {
       liveSerial = cfg.serial;
       full = {}; extra = {};
       reloadReq = null; reloadReqRaisedAt = null; prevInsert = null; lastInsertKind = null; feedEvents = [];
+      inputs = null; inputsPrevBits = ''; usbMode = null;
+      renderInputs();
     }
+    // status/inputs is retained — if nothing lands, this firmware predates it.
+    clearTimeout(inputsWaitTimer);
+    inputsWaitTimer = setTimeout(() => { if (!inputs) renderInputs(true); }, 5000);
     renderUnitBar();
     document.getElementById('crash-banner').className = 'banner none';
     document.getElementById('crash-banner').textContent = 'Waiting for status/crash…';
@@ -765,6 +1092,14 @@ function onMessage(topic, payloadBuf, packet) {
       reloadReqRaisedAt = reloadReq.pending ? Date.now() - (reloadReq.since_sec || 0) * 1000 : null;
       renderFeeding();
     } catch(e) {}
+    return;
+  }
+  if (sub === 'status/inputs') {
+    try { inputs = JSON.parse(payload); inputsAt = Date.now(); inputsRetained = !!(packet && packet.retain); renderInputs(); } catch(e) {}
+    return;
+  }
+  if (sub === 'status/usb_mode') {
+    try { usbMode = JSON.parse(payload); usbModeAt = Date.now(); renderInputs(); } catch(e) {}
     return;
   }
   if (sub === 'status/heartbeat') {
@@ -1375,6 +1710,7 @@ function analyzeHistory() {
   renderHistoryChart();
   renderBinaryChart();
   renderTimeline();
+  renderInputsHistory();
 }
 
 function fmtNum(v) {

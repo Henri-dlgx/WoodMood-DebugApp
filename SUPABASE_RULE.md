@@ -36,7 +36,8 @@ SELECT
   payload,
   substr(nth(1, tokens(topic, '/')), 9) as device
 FROM
-  "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash", "+/status/firmware"
+  "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash", "+/status/firmware",
+  "+/status/inputs", "+/status/usb_mode"
 ```
 
 `+` matches any single topic level, so `+/status/full` matches
@@ -87,6 +88,14 @@ lives only on the retained `status/firmware` topic (published once per MQTT
 connect, so a handful of rows per day). Without `"+/status/firmware"` in the
 `FROM`, History shows **"version not logged"** for current firmware. The
 demo/mainline badge still works either way: it is inferred from `status/full`.
+
+#### About `status/inputs` and `status/usb_mode`
+
+The **Switch & Sensor Check — History** card is built only from these two
+topics. Both are retained and published on change (plus once per connect), so
+they add a few rows per check, not a 1 Hz stream. Without them in the `FROM`
+the card says "No status/inputs rows in this range". Needs firmware with the
+switch check (WM-code-demo main ≥ b0bcaf5; `usb_mode` ≥ 2426531).
 
 #### About `status/crash` specifically
 
