@@ -184,6 +184,11 @@
       <span id="status-label">Disconnected</span>
       <span id="msg-count" style="margin-left:auto"></span>
     </div>
+    <div class="status-row" id="live-row">
+      <span id="live-label">Live updates: —</span>
+      <button class="btn-share" style="margin-left:auto" onclick="setLive(30)">Live 1 s for 30 min</button>
+      <button class="btn-share" onclick="setLive(0)">Stop</button>
+    </div>
     <div class="share-row">
       <input id="share-string" placeholder="Paste a config string here to auto-fill &amp; connect…"/>
       <button class="btn-share" onclick="loadConfigString()">Load</button>
@@ -483,6 +488,8 @@ let inputsPrevBits = '';       // to flash tiles that just turned green
 let inputsWaitTimer = null;
 let usbMode = null;            // parsed status/usb_mode { on, left_min }
 let usbModeAt = 0;
+let liveMode = null;           // parsed status/live { on, left_s } — 1 Hz status/full test mode
+let liveModeAt = 0;
 let liveSerial = null;         // serial the per-stove state above belongs to           // [{ t, kind }] hand-fed logs / machine inserts seen this session
 
 // ============================================================
@@ -605,6 +612,23 @@ function renderInputsTime() {
     const sec = (inputs.since_s || 0) + Math.floor((Date.now() - inputsAt) / 1000);
     a.textContent = `Check running for ${inputsRetained ? 'at least ' : ''}${formatDuration(sec)}`;
   }
+}
+
+// status/full is sent every 30 s unless LIVE mode is on (firmware ≥ the live-mode
+// commit); state/door/fault changes still arrive at once either way.
+function renderLive() {
+  const el = document.getElementById('live-label');
+  if (!el) return;
+  if (!liveMode) { el.textContent = client ? 'Live updates: — (firmware without live mode sends every 1 s)' : 'Live updates: —'; return; }
+  const left = liveMode.on ? Math.max(0, (liveMode.left_s || 0) - Math.floor((Date.now() - liveModeAt) / 1000)) : 0;
+  el.innerHTML = liveMode.on && left > 0
+    ? `<b style="color:var(--green)">Live: status every 1 s</b> · ${formatDuration(left)} left`
+    : 'Slow mode: status every 30 s (changes still instant)';
+}
+
+function setLive(min) {
+  if (!client || !client.connected) { alert('Connect to a stove first.'); return; }
+  client.publish(prefix + '/cmd/live', String(min));
 }
 
 function resetInputsCheck() {
@@ -824,6 +848,7 @@ function renderUnitBar() {
 // LIVE CLOCK / LAST-INSERTION TICKER
 // ============================================================
 function tickClock() {
+  renderLive();
   if (inputs || usbMode) renderInputsTime();
   document.getElementById('li-time').textContent =
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -1020,7 +1045,7 @@ function connect() {
       liveSerial = cfg.serial;
       full = {}; extra = {};
       reloadReq = null; reloadReqRaisedAt = null; prevInsert = null; lastInsertKind = null; feedEvents = [];
-      inputs = null; inputsPrevBits = ''; usbMode = null;
+      inputs = null; inputsPrevBits = ''; usbMode = null; liveMode = null;
       renderInputs();
     }
     // status/inputs is retained — if nothing lands, this firmware predates it.
@@ -1096,6 +1121,10 @@ function onMessage(topic, payloadBuf, packet) {
   }
   if (sub === 'status/inputs') {
     try { inputs = JSON.parse(payload); inputsAt = Date.now(); inputsRetained = !!(packet && packet.retain); renderInputs(); } catch(e) {}
+    return;
+  }
+  if (sub === 'status/live') {
+    try { liveMode = JSON.parse(payload); liveModeAt = Date.now(); renderLive(); } catch(e) {}
     return;
   }
   if (sub === 'status/usb_mode') {
