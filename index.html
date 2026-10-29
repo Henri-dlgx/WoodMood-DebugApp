@@ -2228,16 +2228,42 @@ function tlBuild() {
     st.max = sp.max = Math.max(st.max, sp.max);
   }
 
-  // insertion events — reconstruct the true insert time from last_insert_ago_sec,
-  // then dedupe the cluster of rows that all point back to the same insert.
+  // insertion events — every row points back at the insert through
+  // last_insert_ago_sec. received_at − ago is only as good as the row's
+  // delivery: a row that reached the broker 20 s+ late (flaky WiFi, TCP
+  // retransmits) lands its insert 20 s+ too late and drew a phantom extra
+  // marker. uptime − ago is stamped by the stove itself, so it's identical on
+  // every row that refers to the same insert however late it arrived. Key on
+  // that per boot, then place it on the wall clock with the boot's
+  // least-delayed row (min of received_at − uptime).
   const raw = [];
+  const boots = [];
+  let bootPrevUp = null;
   fullRows.forEach(fr => {
     const p = fr.p;
+    const up = typeof p.uptime === 'number' ? p.uptime : null;
+    if (up !== null) {
+      if (bootPrevUp === null || up < bootPrevUp) boots.push({ anchor: Infinity, inserts: [] });
+      bootPrevUp = up;
+      const b = boots[boots.length - 1];
+      b.anchor = Math.min(b.anchor, fr.t - up * 1000);
+    }
     if (p.last_insert_ever === false) return;
     if (typeof p.last_insert_ago_sec !== 'number') return;
     // In manual feeding the machine never inserts, so a fresh re-anchor of
     // last_insert_ago_sec there is the stove counting a log the user added.
-    raw.push({ t: fr.t - p.last_insert_ago_sec * 1000, side: tlSideKey(p.last_insert_side || 'L'), hand: p.feed_manual === true });
+    const e = { side: tlSideKey(p.last_insert_side || 'L'), hand: p.feed_manual === true };
+    if (up !== null) boots[boots.length - 1].inserts.push({ ...e, key: up - p.last_insert_ago_sec });
+    else raw.push({ ...e, t: fr.t - p.last_insert_ago_sec * 1000 }); // older firmware without uptime
+  });
+  boots.forEach(b => {
+    // uptime and ago are each floored seconds, so one insert can wobble ±1 s.
+    let last = null;
+    b.inserts.forEach(e => {
+      if (last !== null && Math.abs(e.key - last) <= 2) return;
+      last = e.key;
+      raw.push({ t: b.anchor + e.key * 1000, side: e.side, hand: e.hand });
+    });
   });
   raw.sort((a, b) => a.t - b.t);
   const events = [];
