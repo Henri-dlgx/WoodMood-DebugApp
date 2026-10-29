@@ -317,7 +317,7 @@
 
   <div class="card">
     <h2>Timeline</h2>
-    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp with its setpoint as a red line on the same scale, fan speeds and chip temp overlaid — each otherwise scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, automatic vs manual feeding (with hand-fed logs marked), and every restart (with its reset reason and any firmware flash, when status/crash and status/firmware are in the fetch), all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
+    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp with its setpoint as a red line on the same scale, fan speeds and chip temp overlaid — each otherwise scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, automatic vs manual feeding (with hand-fed logs marked), every restart (with its reset reason and any firmware flash, when status/crash and status/firmware are in the fetch), and a samples lane showing where data actually arrived — so a stretch where the stove went quiet without rebooting stands out — all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
     <div id="tl-empty" class="empty">Fetch data first — the timeline is built from status/full history.</div>
     <div id="tl-body" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
@@ -351,6 +351,8 @@
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px solid #e6e8ee"></span>restart (pill: flash / power / restart)</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px solid #ff5c6a"></span>crash / watchdog / brownout restart</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(138,144,162,.35)"></span>offline (no data before a restart)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="letter-spacing:2px;color:#4a9eff;font-size:14px;line-height:0">•••</span>samples (brighter = more rows)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(245,166,35,.3);border-bottom:2px dashed #f5a623"></span>no data, no restart (link lost or stalled — hover)</span>
       </div>
       <div style="margin-top:12px">
         <div style="font-size:12px;color:var(--dim);margin-bottom:6px">Diagnostic codes in the window — how often each came up and for how long (spot the recurring ones)</div>
@@ -463,6 +465,8 @@ let stats = {};  // parsed status/stats
 let crash = null;    // parsed status/crash
 let crashRaw = '';   // raw JSON, kept verbatim for the decode-command clipboard action
 let crashWaitTimer = null;  // distinguishes "not reported yet" from "firmware too old"
+let bootAtMs = null;        // wall-clock boot of the live stove: arrival time - uptime
+let crashLogged = null;     // { key, t, bootT } — when Supabase first saw this crash seq
 let lastInsertBaseSec = null;  // last_insert_ago_sec as of the most recent status/full
 let lastInsertBaseAt  = null;  // Date.now() when that value was received
 let extra = {};  // other individual topics: online, firmware, ntfy_link, diag, fault_msg
@@ -1013,7 +1017,7 @@ function connect() {
 
     // Drop the previous stove's crash state — otherwise connecting to a second
     // stove would keep showing the first one's crash, which is worse than useless.
-    crash = null; crashRaw = '';
+    crash = null; crashRaw = ''; bootAtMs = null; crashLogged = null;
     // Per-stove state — only wiped when the serial changes, not on every
     // auto-reconnect, or a WiFi blip would erase the hand-fed log history.
     if (liveSerial !== cfg.serial) {
@@ -1072,7 +1076,14 @@ function onMessage(topic, payloadBuf, packet) {
   logRow(sub, payload);
 
   if (sub === 'status/full') {
-    try { full = JSON.parse(payload); renderAll(); recordHistory(); } catch(e) {}
+    try {
+      full = JSON.parse(payload); renderAll(); recordHistory();
+      if (typeof full.uptime === 'number') {
+        const first = bootAtMs === null;
+        bootAtMs = Date.now() - full.uptime * 1000;
+        if (first && crash) renderCrash();   // crash card was waiting on this for its time
+      }
+    } catch(e) {}
     return;
   }
   if (sub === 'status/stats') {
@@ -1282,6 +1293,62 @@ function renderCrashUnsupported() {
      brownouts. See <code>CRASH_REPORTING.md</code> in the firmware repo.</div>`;
 }
 
+function fmtWhen(t) {
+  const d = new Date(t), today = new Date().toDateString() === d.toDateString();
+  return (today ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' ') + d.toLocaleTimeString();
+}
+
+// CrashRecord stores uptime, not wall time, so the crash moment has to be
+// recovered, best source first:
+//   1. last.ts — epoch seconds of the last breadcrumb, if firmware ever adds it
+//   2. crash.new — this boot followed the crash, and a panic reboots within a
+//      second or two, so the crash is the live stove's boot time
+//   3. Supabase — the first status/crash row carrying this seq was published
+//      right after the reboot that followed it (same reasoning, older crash)
+function crashWhen(last) {
+  if (typeof last.ts === 'number' && last.ts > 1.6e9)
+    return { t: last.ts * 1000, text: fmtWhen(last.ts * 1000), how: 'Crash time recorded by the stove (NTP clock, last moment it was alive).' };
+  if (crash.new && bootAtMs)
+    return { t: bootAtMs, text: '≈ ' + fmtWhen(bootAtMs), how: 'Crash time ≈ this boot: the stove rebooted straight out of the crash, so its boot time (now − uptime) is when it went down.' };
+  const key = (liveSerial || '') + '#' + last.seq;
+  if (crashLogged && crashLogged.key === key && crashLogged.t) {
+    const t = crashLogged.bootT || crashLogged.t;
+    return { t, text: '≈ ' + fmtWhen(t), how: `Crash time ≈ the reboot after it, from History (first logged ${fmtWhen(crashLogged.t)}).` };
+  }
+  lookupCrashTime(key, last.seq);
+  if (crashLogged && crashLogged.key === key && !crashLogged.done)
+    return { t: null, text: 'looking it up…', how: 'Asking History when this crash was first reported…' };
+  if (crash.new) return { t: null, text: 'waiting for uptime…', how: '' };
+  return { t: null, text: bootAtMs ? `before ${fmtWhen(bootAtMs)}` : 'before this boot',
+           how: supaCfg.url && supaCfg.key
+             ? 'This crash is older than the current boot and is not in the History log (the EMQX rule only logs status/crash since Sep 30).'
+             : 'This crash is older than the current boot. Save the Supabase settings on the History tab to look up when it was first reported.' };
+}
+
+async function lookupCrashTime(key, seq) {
+  if (!supaCfg.url || !supaCfg.key || !liveSerial || (crashLogged && crashLogged.key === key)) return;
+  crashLogged = { key, t: null, bootT: null, done: false };
+  const headers = { apikey: supaCfg.key, Authorization: `Bearer ${supaCfg.key}` };
+  const base = `${supaCfg.url}/rest/v1/logs?device=eq.${encodeURIComponent(liveSerial)}`;
+  try {
+    const res = await fetch(`${base}&select=received_at&topic=eq.${encodeURIComponent('WoodMood' + liveSerial + '/status/crash')}`
+      + `&payload->last->>seq=eq.${encodeURIComponent(seq)}&order=received_at.asc&limit=1`, { headers });
+    const row = res.ok ? (await res.json())[0] : null;
+    if (!row || crashLogged.key !== key) return;
+    crashLogged.t = new Date(row.received_at).getTime();
+    // The report goes out a few seconds after boot (WiFi + TLS); the first
+    // status/full after it pins the boot exactly via its uptime.
+    const r2 = await fetch(`${base}&select=received_at,payload&topic=eq.${encodeURIComponent('WoodMood' + liveSerial + '/status/full')}`
+      + `&received_at=gte.${encodeURIComponent(row.received_at)}&order=received_at.asc&limit=1`, { headers });
+    const f = r2.ok ? (await r2.json())[0] : null;
+    const p = f && (typeof f.payload === 'string' ? JSON.parse(f.payload) : f.payload);
+    if (p && typeof p.uptime === 'number' && p.uptime < 600) crashLogged.bootT = new Date(f.received_at).getTime() - p.uptime * 1000;
+  } catch (e) { /* History not reachable — the card keeps "before this boot" */ }
+  if (crashLogged.key !== key) return;
+  crashLogged.done = true;
+  renderCrash();
+}
+
 function renderCrash() {
   const banner = document.getElementById('crash-banner');
   const grid   = document.getElementById('crash-grid');
@@ -1296,9 +1363,12 @@ function renderCrash() {
   if (!last) {
     banner.className = 'banner ok';
     banner.innerHTML = `✓ No crashes recorded <span class="code">last boot: ${crash.boot || '—'}</span>`;
-    grid.innerHTML  = kv('Lifetime crashes', crash.n ?? 0, 'ok') + kv('This boot', crash.boot ?? '—');
+    grid.innerHTML  = kv('Lifetime crashes', crash.n ?? 0, 'ok') + kv('This boot', crash.boot ?? '—')
+                    + (bootAtMs ? kv('Up since', fmtWhen(bootAtMs)) : '');
     btBox.innerHTML = '';
-    acts.innerHTML  = '';
+    acts.innerHTML  = `<div class="crash-hint">Only reboots land here. If the stove went quiet and came back
+      without rebooting (uptime kept counting), it lost its connection rather than crashing — look for a
+      “no data” gap in the History timeline's samples lane.</div>`;
     return;
   }
 
@@ -1315,6 +1385,9 @@ function renderCrash() {
       `<span class="code">stove has rebooted cleanly since</span>`;
 
   let g = '';
+  const when = crashWhen(last);
+  g += kv('Crashed at', when.text, when.t ? 'alert' : 'na');
+  if (when.t && last.up_s !== undefined) g += kv('That run started', fmtWhen(when.t - last.up_s * 1000));
   g += kv('Lifetime crashes', crash.n ?? '—', 'alert');
   g += kv('This boot', crash.boot ?? '—', crash.new ? 'alert' : 'ok');
   g += kv('Reason', last.reason ?? '—', 'alert');
@@ -1365,6 +1438,7 @@ function renderCrash() {
        <button onclick="copyDecodeCmd()">Copy decode command</button>
        <button onclick="copyCrashJson()">Copy raw JSON</button>
      </div>
+     <div class="crash-hint">${escapeHtml(when.how)}</div>
      <div class="crash-hint">
        Run the command in the <code>HenriLib</code> repo. It finds the ELF whose SHA256 starts
        with <code>${escapeHtml(last.elf || '?')}</code> and symbolises these frames.
@@ -2073,7 +2147,13 @@ const TL_INS = '#e5484d', TL_TRANS = '#bb86fc', TL_AXIS = '#8a90a2', TL_GRID = '
 const TLX0 = 50, TLW = 900, TLY0 = 12, TLH = 170, TLY1 = 182,
       TL_LLY = 200, TL_LRY = 228, TL_GY = 214, TL_SY = 240, TL_SH = 24, TL_SPY = 272, TL_SPH = 30,
       TL_IAY = 310, TL_IAH = 24, TL_CDY = 340, TL_CDH = 22, TL_FDY = 368, TL_FDH = 22,
-      TL_VBH = 398, TL_VB = TL_SY + TL_SH;
+      TL_SMY = 398, TL_SMH = 14, TL_VBH = 420, TL_VB = TL_SY + TL_SH;
+// Samples lane: the window is cut into this many slices and each slice that got
+// at least one status/full row gets a dot, brighter the more rows it got. Gaps
+// are stretches with no row at all for much longer than the stove's recent
+// publish rate (1 s live, 30 s otherwise) — a frozen loop or a dropped link.
+const TL_SM_BUCKETS = 300, TL_GAP = '#f5a623', TL_GAP_FILL = 'rgba(245,166,35,0.12)', TL_SMDOT = '#4a9eff';
+let tlBuckets = null;  // { a, w, counts } from the last draw — read by the hover tooltip
 
 let tlEnabled = { stove_temp: true, setpoint: true, fan_main: true, fan_cooling: true, room_temp: false, chip_temp: true };
 let tlNorm = true;
@@ -2083,6 +2163,7 @@ let tlWired = false;
 
 function tlSideKey(v) { return String(v).toUpperCase().charAt(0) === 'R' ? 'R' : 'L'; }
 function tlClock(t)   { return new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
+function tlDur(sec)   { sec = Math.max(1, Math.round(sec)); if (sec < 90) return sec + ' s'; const m = Math.round(sec / 60); return m < 90 ? m + ' min' : (m / 60).toFixed(1) + ' h'; }
 function tlFmt(v)     { return Number.isInteger(v) ? String(v) : v.toFixed(1); }
 
 // Collapse consecutive rows with the same value into [start,end] segments.
@@ -2237,7 +2318,41 @@ function tlBuild() {
     prevUp = up; prevT = fr.t;
   });
 
-  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, fdSeg, restarts, spMin: spMin - pad, spMax: spMax + pad, fullRows };
+  // Gaps that did NOT end in a restart (those are the offline stretch above).
+  // The threshold follows the recent publish rate, so a 20 s hole in 1 Hz live
+  // mode counts but the normal 30 s cadence outside it doesn't. Uptime only
+  // proves there was no reboot — a blocked loop and a dead link look the same
+  // there. What tells them apart: status/firmware inside the gap means MQTT
+  // reconnected (the link dropped), and several rows landing within a few ms
+  // right after it means they were queued in transit and flushed late. Those
+  // late rows carry old uptimes, so uptime is read from the first row after them.
+  const gaps = [], ivs = [];
+  for (let i = 1; i < fullRows.length; i++) {
+    const r0 = fullRows[i - 1], r1 = fullRows[i], dt = r1.t - r0.t;
+    const recent = ivs.slice(-20).sort((x, y) => x - y), med = recent.length ? recent[recent.length >> 1] : 1000;
+    ivs.push(dt);
+    if (dt <= Math.max(15000, med * 4)) continue;
+    const u0 = r0.p.uptime, u1 = r1.p.uptime, hasUp = typeof u0 === 'number' && typeof u1 === 'number';
+    if (hasUp && u1 < u0) continue;
+    let j = i;
+    while (j + 1 < fullRows.length && fullRows[j + 1].t - fullRows[j].t < 300) j++;
+    const fresh = fullRows[Math.min(j + 1, fullRows.length - 1)];
+    gaps.push({ start: r0.t, end: r1.t, burst: j - i + 1,
+                ranS: hasUp && typeof fresh.p.uptime === 'number' ? fresh.p.uptime - u0 : null,
+                reconnect: bootRows.fw.some(o => o.t > r0.t && o.t <= r1.t + 5000) });
+  }
+
+  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, fdSeg, restarts, gaps, spMin: spMin - pad, spMax: spMax + pad, fullRows };
+}
+
+function tlGapText(g) {
+  const fmt = t => new Date(t).toLocaleTimeString();
+  const parts = [`no data ${fmt(g.start)} → ${fmt(g.end)} (${tlDur((g.end - g.start) / 1000)})`];
+  if (g.ranS !== null) parts.push(`no reboot (uptime +${tlDur(g.ranS)})`);
+  if (g.reconnect) parts.push('MQTT dropped and reconnected (status/firmware re-sent) — a lost connection, not a crash');
+  else if (g.burst > 1) parts.push(`${g.burst} samples then arrived late in one burst — the connection stalled and caught up`);
+  else parts.push('stove went quiet: a blocked loop or a dropped link (no reconnect seen)');
+  return parts.join(' · ');
 }
 
 function tlGlobalMax() {
@@ -2309,13 +2424,25 @@ function tlDraw() {
   const ticks = 6;
   for (let i = 0; i <= ticks; i++) { const t = a + span * i / ticks, x = TLX0 + TLW * i / ticks; p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TLY1}" stroke="${TL_GRID}"/>`); p.push(`<text x="${x}" y="${TLY1 + 12}" text-anchor="${i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}" font-size="10" fill="${TL_AXIS}">${tlClock(t)}</text>`); }
   tlData.restarts.forEach(r => { if (r.offFrom === null) return; const s0 = Math.max(r.offFrom, a), e0 = Math.min(r.t, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0); p.push(`<rect x="${xa}" y="${TLY0}" width="${xb - xa}" height="${TL_FDY + TL_FDH - TLY0}" fill="${TL_OFF}"/>`); if (xb - xa > 44) p.push(`<text x="${(xa + xb) / 2}" y="${TLY1 - 6}" text-anchor="middle" font-size="10" fill="${TL_AXIS}">offline</text>`); });
+  tlData.gaps.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0); p.push(`<rect x="${xa}" y="${TLY0}" width="${Math.max(1, xb - xa)}" height="${TL_SMY + TL_SMH - TLY0}" fill="${TL_GAP_FILL}"/>`); if (xb - xa > 60) p.push(`<text x="${(xa + xb) / 2}" y="${TLY1 - 6}" text-anchor="middle" font-size="10" fill="${TL_GAP}">no data ${tlDur((g.end - g.start) / 1000)}</text>`); });
   tlData.sideSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), col = TL_SIDECOL[g.v]; p.push(`<rect x="${xa}" y="${TL_SY}" width="${xb - xa}" height="${TL_SH}" fill="${col.fill}"/>`); if (xb - xa > 46) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SY + TL_SH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
   tlData.spSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = TL_SPCOL[g.mode] || TL_SPCOL.fixed; p.push(`<rect x="${xa}" y="${TL_SPY}" width="${w}" height="${TL_SPH}" fill="${col.band}"/>`); const frac = Math.max(0, Math.min(1, (g.sp - tlData.spMin) / ((tlData.spMax - tlData.spMin) || 1))), lh = frac * TL_SPH; p.push(`<rect x="${xa}" y="${TL_SPY + TL_SPH - lh}" width="${w}" height="${lh}" fill="${col.lvl}"/>`); if (w > 26) { p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 14}" text-anchor="middle" font-size="12" fill="${col.tx}">${Math.round(g.sp)}°</text>`); if (w > 66) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 26}" text-anchor="middle" font-size="9" fill="${col.tx}">${col.name}</text>`); } });
   tlData.spSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TL_SPY - 3}" x2="${x}" y2="${TL_SPY + TL_SPH + 3}" stroke="${TL_AXIS}" stroke-dasharray="1 3"/>`); });
   tlData.iaSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = g.on ? TL_IACOL.on : TL_IACOL.off; p.push(`<rect x="${xa}" y="${TL_IAY}" width="${w}" height="${TL_IAH}" fill="${col.fill}"/>`); if (w > 46) p.push(`<text x="${(xa + xb) / 2}" y="${TL_IAY + TL_IAH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
   tlData.iaSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = tlCodeCol(g.code); p.push(`<rect x="${xa}" y="${TL_CDY}" width="${w}" height="${TL_CDH}" fill="${col.fill}"/>`); if (w > 3) p.push(`<line x1="${xa}" y1="${TL_CDY}" x2="${xa}" y2="${TL_CDY + TL_CDH}" stroke="${TL_SURF}" stroke-width="1"/>`); if (w > 14) p.push(`<text x="${(xa + xb) / 2}" y="${TL_CDY + TL_CDH / 2 + 4}" text-anchor="middle" font-size="11" font-weight="600" fill="${col.tx}">${g.code}</text>`); });
   tlData.fdSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = TL_FDCOL[g.v]; p.push(`<rect x="${xa}" y="${TL_FDY}" width="${w}" height="${TL_FDH}" fill="${col.fill}"/>`); if (w > 70) p.push(`<text x="${(xa + xb) / 2}" y="${TL_FDY + TL_FDH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
-  [['log_l', TL_LLY], ['log_r', TL_LRY], ['side', TL_SY + TL_SH / 2], ['setpoint', TL_SPY + TL_SPH / 2], ['insertion', TL_IAY + TL_IAH / 2], ['code', TL_CDY + TL_CDH / 2], ['feed', TL_FDY + TL_FDH / 2]].forEach(l => p.push(`<text x="${TLX0 - 7}" y="${l[1] + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${l[0]}</text>`));
+  // Samples lane — one dot per slice that got data, opacity by how many rows it
+  // got relative to the busiest slice, and a dashed bar under every gap.
+  const bw = span / TL_SM_BUCKETS, counts = new Array(TL_SM_BUCKETS).fill(0);
+  let nWin = 0;
+  tlData.fullRows.forEach(fr => { if (fr.t < a || fr.t > b) return; nWin++; counts[Math.min(TL_SM_BUCKETS - 1, Math.floor((fr.t - a) / bw))]++; });
+  tlBuckets = { a, w: bw, counts };
+  const cMax = Math.max(1, ...counts), smY = TL_SMY + TL_SMH / 2;
+  counts.forEach((c, i) => { if (!c) return; p.push(`<circle cx="${TLX0 + (i + 0.5) * TLW / TL_SM_BUCKETS}" cy="${smY}" r="1.4" fill="${TL_SMDOT}" fill-opacity="${(0.3 + 0.7 * c / cMax).toFixed(2)}"/>`); });
+  tlData.gaps.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; p.push(`<line x1="${xF(s0)}" y1="${smY}" x2="${Math.max(xF(s0) + 1, xF(e0))}" y2="${smY}" stroke="${TL_GAP}" stroke-width="2" stroke-dasharray="3 2"/>`); });
+  const nGaps = tlData.gaps.filter(g => g.end >= a && g.start <= b).length;
+  document.getElementById('tl-winlbl').textContent = `${tlClock(a)} → ${tlClock(b)} · ${nWin.toLocaleString()} samples${nGaps ? ` · ${nGaps} gap${nGaps > 1 ? 's' : ''}` : ''}`;
+  [['log_l', TL_LLY], ['log_r', TL_LRY], ['side', TL_SY + TL_SH / 2], ['setpoint', TL_SPY + TL_SPH / 2], ['insertion', TL_IAY + TL_IAH / 2], ['code', TL_CDY + TL_CDH / 2], ['feed', TL_FDY + TL_FDH / 2], ['samples', smY]].forEach(l => p.push(`<text x="${TLX0 - 7}" y="${l[1] + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${l[0]}</text>`));
   TL_SERIES.forEach(s => { if (!tlEnabled[s.key]) return; const ser = tlData.series[s.key]; if (!ser || ser.pts.length < 2) return; const pts = ser.pts.map(o => xF(o.t) + ',' + yF(s, o.v)).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#tlpc)"/>`); });
   tlData.sideSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_VB}" stroke="${TL_TRANS}" stroke-width="1.5" stroke-dasharray="2 3"/>`); });
   tlData.events.forEach(ev => {
@@ -2455,6 +2582,10 @@ function tlWireOnce() {
     }
     const fd = tlSegAt(tlData.fdSeg, near.t);
     if (fd) meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">feed</span><span style="font-weight:600;color:${TL_FDCOL[fd.v].tx}">${TL_FDCOL[fd.v].name}</span></div>`;
+    if (tlBuckets) {
+      const bi = Math.max(0, Math.min(TL_SM_BUCKETS - 1, Math.floor((t - tlBuckets.a) / tlBuckets.w)));
+      meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">samples</span><span style="font-weight:600">${tlBuckets.counts[bi]} in ${tlDur(tlBuckets.w / 1000)}</span></div>`;
+    }
     const evN = tlData.events.filter(ev => Math.abs(ev.t - near.t) <= 20000)[0];
     let note = !evN ? '' : evN.hand
       ? `<div style="margin-top:4px;color:${TL_HAND}">log added by hand · stove counted it</div>`
@@ -2462,6 +2593,8 @@ function tlWireOnce() {
     // Within ~2 % of the window (min 30 s) so the marker is hoverable when zoomed out.
     const rsTol = Math.max(30000, (b - a) * 0.02);
     const rsN = tlData.restarts.filter(r => Math.abs(r.t - t) <= rsTol).sort((x, y) => Math.abs(x.t - t) - Math.abs(y.t - t))[0];
+    const gpN = tlData.gaps.find(g => t >= g.start && t <= g.end);
+    if (gpN) note += `<div style="margin-top:4px;color:${TL_GAP};max-width:240px">⚠ ${escapeHtml(tlGapText(gpN))}</div>`;
     if (rsN) note += `<div style="margin-top:4px;color:${rsN.crashed ? TL_RST_BAD : TL_RST}">↻ restarted ${new Date(rsN.t).toLocaleTimeString()} · ${escapeHtml(tlRestartText(rsN))}</div>`;
     const tt = document.getElementById('tl-tt');
     tt.innerHTML = `<div style="font-weight:600;margin-bottom:4px">${new Date(near.t).toLocaleTimeString()}</div>${rows}<div style="border-top:1px solid var(--border);margin:5px 0 4px"></div>${meta}${note}`;
