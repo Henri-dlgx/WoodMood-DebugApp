@@ -37,8 +37,13 @@ SELECT
   substr(nth(1, tokens(topic, '/')), 9) as device
 FROM
   "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash", "+/status/firmware",
-  "+/status/inputs", "+/status/usb_mode"
+  "+/status/inputs", "+/status/usb_mode", "+/status/link"
 ```
+
+> **Manual console change pending (2026-10-29):** `"+/status/link"` was added to
+> this SQL in the docs only. The live EMQX rule has to be edited by hand (Data
+> Integration → Rules → this rule → SQL), then *SQL Test* and Save. Until then
+> link-loss records only reach the live view, not History.
 
 `+` matches any single topic level, so `+/status/full` matches
 `WoodMood<ANYSERIAL>/status/full`. New stoves are logged automatically — no rule
@@ -97,6 +102,20 @@ they add a few rows per check, not a 1 Hz stream. Without them in the `FROM`
 the card says "No status/inputs rows in this range". Needs firmware with the
 switch check (WM-code-demo main ≥ b0bcaf5; `usb_mode` ≥ 2426531).
 
+#### About `status/link`
+
+Published **once per MQTT reconnect** after an outage (never at the first
+connect of a boot) and **retained**. One row = one dropped link: when it went
+down (`down_ts`), how long (`down_s`), the PubSubClient state at the drop
+(`mqtt_state`), whether WiFi itself went (`wifi_lost`, `wifi_reason` = first
+STA disconnect reason, `wifi_reason_last`, `wifi_events`), whether the
+`WoodMood-Setup` AP fallback came up (`ap_mode`), the RSSI before the drop
+(`rssi_before`) and the outage count this boot (`n`). `down_ts`/`up_ts` are
+omitted until NTP syncs. This is what tells a "freeze" (the Oct 29 2026
+TEST001 15-minute gap) apart from a crash. Firmware: HenriLib branch
+`claude/link-loss-crash-ts` (not yet on WM-code-demo main). Field reference in
+the firmware repo's `CRASH_REPORTING.md`.
+
 #### About `status/crash` specifically
 
 Unlike `status/full` (1 Hz), `status/crash` is published **once per boot** and is
@@ -129,7 +148,7 @@ Unlike `status/full` (1 Hz), `status/crash` is published **once per boot** and i
 - **Last hour:** keep every row (full 1 s resolution for live debugging).
 - **Older than 1 hour:** thin `status/full` to **one row per stove per minute** (~60× smaller).
 - **Older than N days:** delete everything.
-- `status/diag`, `status/stats`, `status/crash` are never thinned — they're small,
+- `status/diag`, `status/stats`, `status/crash`, `status/link` are never thinned — they're small,
   infrequent, and a short-lived diag code is exactly what you want to find later.
 
 ### Check the current size first
