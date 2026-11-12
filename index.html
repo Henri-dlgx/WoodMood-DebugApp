@@ -237,6 +237,20 @@
     <div class="grid" id="temp-grid"><div class="empty">No data yet</div></div>
   </div>
 
+  <div class="card" id="rs-card">
+    <div class="inp-head">
+      <h2>Room Thermometer (BLE)</h2>
+      <span class="usb-badge" id="rs-badge">Scan: —</span>
+    </div>
+    <div id="rs-body"><div class="empty">Waiting for status/heap… (the stove sends it every 30 s)</div></div>
+    <div class="inp-foot">
+      <button class="btn-share" onclick="bleBoost(45)">Force connect (45 s)</button>
+      <button class="btn-share" onclick="bleBoost(180)">Force connect (3 min)</button>
+      <span id="rs-boost-note"></span>
+    </div>
+    <div class="share-note">Over the last 60 minutes: <b>minutes with a reading</b> is what the app experiences — close to all of them means the room temperature never goes stale. <b>Messages read OK</b> is lower by nature on a stock Xiaomi sensor: most of its broadcasts carry humidity or battery, not temperature. Minutes where the stove paused scanning (fault, log insertion, low memory, setup hotspot) are counted apart so they don't count against the sensor. Any <b>decrypt failure</b> means the bind key is wrong — pair the sensor again. “Force connect” scans almost full-time until the first reading, then goes back to normal; it does nothing during a fault or a log insertion.</div>
+  </div>
+
   <div class="two-col">
     <div class="card">
       <h2>System</h2>
@@ -485,6 +499,13 @@ let inputsAt = 0;              // Date.now() when it arrived
 let inputsRetained = false;    // retained replay → since_s is only a lower bound for "running for"
 let inputsPrevBits = '';       // to flash tiles that just turned green
 let inputsWaitTimer = null;
+let heap = null;               // parsed status/heap — memory + BLE room-sensor counters (every 30 s, retained)
+let heapAt = 0;                // Date.now() when it arrived (ble_age_s keeps counting from there)
+let bleBoostAt = 0;            // Date.now() a boost was sent from here (0 = none)
+let bleBoostSecs = 0;
+let bleBoostReadsAt = null;    // heap.ble_readings when the boost was sent
+let bleBoostDone = '';         // result line once a reading arrived after the boost
+let bleBoostRoomOk = false;    // full.room_temp_ok when the boost was sent (false → true = sensor found)
 let usbMode = null;            // parsed status/usb_mode { on, left_min }
 let usbModeAt = 0;
 let liveSerial = null;         // serial the per-stove state above belongs to           // [{ t, kind }] hand-fed logs / machine inserts seen this session
@@ -829,6 +850,7 @@ function renderUnitBar() {
 // ============================================================
 function tickClock() {
   if (inputs || usbMode) renderInputsTime();
+  if (heap || bleBoostAt) renderRoomSensor();   // "last reading … ago" and the boost result keep moving
   document.getElementById('li-time').textContent =
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
@@ -1025,7 +1047,9 @@ function connect() {
       full = {}; extra = {};
       reloadReq = null; reloadReqRaisedAt = null; prevInsert = null; lastInsertKind = null; feedEvents = [];
       inputs = null; inputsPrevBits = ''; usbMode = null;
+      heap = null; bleBoostAt = 0; bleBoostDone = '';
       renderInputs();
+      renderRoomSensor();
     }
     // status/inputs is retained — if nothing lands, this firmware predates it.
     clearTimeout(inputsWaitTimer);
@@ -1113,6 +1137,10 @@ function onMessage(topic, payloadBuf, packet) {
     try { usbMode = JSON.parse(payload); usbModeAt = Date.now(); renderInputs(); } catch(e) {}
     return;
   }
+  if (sub === 'status/heap') {
+    try { heap = JSON.parse(payload); heapAt = Date.now(); renderRoomSensor(); } catch(e) {}
+    return;
+  }
   if (sub === 'status/heartbeat') {
     // Debug app acts as a valid heartbeat client so opening this tool alone
     // doesn't itself trigger DIAG_HEARTBEAT_UNHEALTHY / suspend auto-insertion.
@@ -1167,9 +1195,97 @@ function renderAll() {
   renderDoors();
   renderFault();
   renderTemp();
+  renderRoomSensor();
   renderSystem();
   renderNet();
   renderAllFields();
+}
+
+// ---- Room thermometer (BLE) — status/heap ble_* fields + cmd/ble_boost -------
+// ble_rx_* exist from firmware 9f74d7d (Nov 2026) on; older builds only send
+// ble_mode/ble_readings/ble_age_s, and builds before 7727b0c send no ble_* at all.
+function renderRoomSensor() {
+  const body  = document.getElementById('rs-body');
+  const badge = document.getElementById('rs-badge');
+  const note  = document.getElementById('rs-boost-note');
+  if (!body) return;
+
+  // Boost result: a reading counted after the boost, or room_temp coming back.
+  if (bleBoostAt && !bleBoostDone) {
+    const secs = Math.round((Date.now() - bleBoostAt) / 1000);
+    const newReading = heap && bleBoostReadsAt !== null && heap.ble_readings > bleBoostReadsAt;
+    if (newReading || (!bleBoostRoomOk && full.room_temp_ok)) {
+      bleBoostDone = `Sensor read ✓ (seen ${secs} s after the boost)`;
+    } else if (secs > bleBoostSecs + 35) {
+      bleBoostDone = `No reading within ${bleBoostSecs} s — out of range, wrong MAC/key, or the sensor sent no temperature yet`;
+    }
+  }
+  if (note) {
+    note.textContent = !bleBoostAt ? '' : bleBoostDone ||
+      `Boost sent ${new Date(bleBoostAt).toLocaleTimeString([], { hour12: false })} (${bleBoostSecs} s) — waiting for a reading…`;
+    note.style.color = bleBoostDone.startsWith('Sensor') ? 'var(--green)' : bleBoostDone ? 'var(--amber)' : 'var(--dim)';
+  }
+
+  if (!heap) return;
+  if (heap.ble_mode === undefined) {
+    badge.className = 'usb-badge'; badge.textContent = 'Scan: —';
+    body.innerHTML = '<div class="empty">This firmware doesn\'t report BLE counters in status/heap (needs the Nov 2026 room-sensor build).</div>';
+    return;
+  }
+
+  const cont = heap.ble_mode === 'continuous';
+  badge.className = 'usb-badge ' + (heap.ble_paused ? 'usb' : cont ? 'armed' : '');
+  badge.textContent = heap.ble_paused ? 'Scan PAUSED'
+                    : cont ? 'Scan: whitelist + continuous' : 'Scan: windowed (no sensor MAC?)';
+
+  // Seconds since the last reading, still counting since status/heap arrived.
+  const ageSec = (typeof heap.ble_age_s === 'number' && heap.ble_age_s >= 0)
+    ? heap.ble_age_s + Math.floor((Date.now() - heapAt) / 1000) : null;
+  const mac = full.room_sensor_mac;
+
+  let sum = '';
+  if (heap.ble_rx_min !== undefined) {
+    const n = heap.ble_rx_min, ok = heap.ble_rx_min_ok, paused = heap.ble_rx_min_paused || 0;
+    const counted = Math.max(0, n - paused);
+    const pct = counted ? Math.round(100 * Math.min(ok, counted) / counted) : 0;
+    const good = counted > 0 && pct >= 90;
+    sum = `<div class="inp-sum${good ? ' done' : ''}">
+        <div class="big">${n ? Math.min(ok, counted) : '—'}<small> / ${counted} min</small></div>
+        <div class="rest">
+          <div class="inp-bar"><div style="width:${n ? pct : 0}%"></div></div>
+          <div class="inp-todo">${n === 0 ? 'First minute not finished yet — counting starts when BLE starts.'
+            : `<b>${pct}%</b> of the minutes the stove was listening had a reading (last ${n} min)` +
+              (paused ? ` · ${paused} min paused, not counted` : '') +
+              (n < 60 ? ` · window fills up to 60 min (${n} so far)` : '')}</div>
+        </div></div>`;
+  }
+
+  const rxPct = heap.ble_rx_ads ? Math.round(100 * heap.ble_rx_ok / heap.ble_rx_ads) + '%' : '—';
+  body.innerHTML = sum + '<div class="grid">' +
+    kv('Room temp now', full.room_temp_ok ? full.room_temp + '°C' : 'unavailable', full.room_temp_ok ? 'ok' : 'alert') +
+    kv('Last reading', ageSec === null ? 'none since boot' : formatDuration(ageSec) + ' ago',
+       ageSec === null || ageSec > 300 ? 'alert' : '') +
+    (heap.ble_rx_ads !== undefined
+      ? kv('Messages read OK (60 min)', `${heap.ble_rx_ok} / ${heap.ble_rx_ads} (${rxPct})`)
+      : kv('Messages read OK', 'needs newer firmware', 'na')) +
+    (heap.ble_rx_dec_fail !== undefined
+      ? kv('Decrypt failures (since boot)', heap.ble_rx_dec_fail ? heap.ble_rx_dec_fail + ' — wrong bind key?' : '0',
+           heap.ble_rx_dec_fail ? 'alert' : 'ok')
+      : '') +
+    kv('Readings since boot', heap.ble_readings ?? '—') +
+    kv('Low-memory pauses', heap.ble_auto_pauses ?? '—', heap.ble_auto_pauses ? 'alert' : '') +
+    kv('Sensor MAC', mac ? mac : 'not paired', mac ? '' : 'alert') +
+    kv('Free memory (lowest, 30 s)', heap.min_window !== undefined ? Math.round(heap.min_window / 1024) + ' KB' : '—') +
+    '</div>';
+}
+
+function bleBoost(secs) {
+  if (!client || !client.connected) { alert('Connect to a stove first.'); return; }
+  client.publish(prefix + '/cmd/ble_boost', String(secs));
+  bleBoostAt = Date.now(); bleBoostSecs = secs; bleBoostDone = '';
+  bleBoostReadsAt = heap && typeof heap.ble_readings === 'number' ? heap.ble_readings : null;
+  bleBoostRoomOk  = !!full.room_temp_ok;
+  renderRoomSensor();
 }
 
 function renderBanner() {
