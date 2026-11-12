@@ -1290,8 +1290,13 @@ function renderRoomSensor() {
   }
 
   const cont = heap.ble_mode === 'continuous';
-  badge.className = 'usb-badge ' + (heap.ble_paused ? 'usb' : cont ? 'armed' : '');
-  badge.textContent = heap.ble_paused ? 'Scan PAUSED'
+  // ble_pause (firmware with the Nov 12 fixes): why the scan isn't running.
+  const PAUSE_WHY = { heap: 'low memory', fault: 'stove in fault', hotspot: 'setup hotspot',
+                      manual: 'log insertion / notification', starting: 'starting up' };
+  const why = heap.ble_pause ? (PAUSE_WHY[heap.ble_pause] || heap.ble_pause) : '';
+  const paused = heap.ble_paused || heap.ble_pause === 'starting';
+  badge.className = 'usb-badge ' + (paused ? 'usb' : cont ? 'armed' : '');
+  badge.textContent = paused ? 'Scan PAUSED' + (why ? ' — ' + why : '')
                     : cont ? 'Scan: whitelist + continuous' : 'Scan: windowed (no sensor MAC?)';
 
   // Seconds since the last reading, still counting since status/heap arrived.
