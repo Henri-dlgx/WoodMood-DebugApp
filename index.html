@@ -226,8 +226,12 @@
   <div class="card" id="inp-card">
     <div class="inp-head">
       <h2>Switch &amp; Sensor Check</h2>
-      <span class="usb-badge" id="usb-badge">USB mode: —</span>
+      <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="usb-badge" id="usb-badge">USB mode: —</span>
+        <button class="btn-share" id="usb-btn" style="display:none;padding:4px 10px;font-size:12px" onclick="toggleUsbMode()"></button>
+      </span>
     </div>
+    <div class="share-note" id="usb-note" style="display:none;margin:-4px 0 10px;text-align:right"></div>
     <div id="inp-body"><div class="empty">Waiting for status/inputs…</div></div>
     <div class="share-note">Build check: open every door and press every button once — each tile turns green the first time the stove sees it, and stays green until you start a fresh check (or the stove reboots). The blue “now” tag is what the input reads this second, so a tile that is green <i>and</i> permanently blue may be stuck rather than tested. Grey tiles can't be read on this build: forward end switches are off during USB mode, trapdoor sensors are not compiled in.</div>
   </div>
@@ -625,11 +629,62 @@ function renderInputsTime() {
     b.className = 'usb-badge usb';
     b.textContent = `USB mode — fwd switches OFF · ${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min left`;
   } else { b.className = 'usb-badge armed'; b.textContent = 'Forward switches armed'; }
+  renderUsbButton();
   const a = document.getElementById('inp-age');
   if (a && inputs) {
     const sec = (inputs.since_s || 0) + Math.floor((Date.now() - inputsAt) / 1000);
     a.textContent = `Check running for ${inputsRetained ? 'at least ' : ''}${formatDuration(sec)}`;
   }
+}
+
+// ---- USB mode on/off (cmd/usb_debug) -----------------------------------------
+// "1" = 3 h USB mode: the stove REBOOTS if its forward switches were armed (only a
+// reboot hands GPIO20 back to USB). "0" = arm the switches now, USB drops. The
+// firmware refuses both during a log insertion. Hidden until status/usb_mode has
+// arrived — older firmware has no USB mode.
+let usbCmdAt = 0;        // Date.now() a command was sent from here (0 = none pending)
+let usbCmdWant = null;   // true = asked for USB mode, false = asked to arm the switches
+
+function renderUsbButton() {
+  const btn = document.getElementById('usb-btn');
+  const note = document.getElementById('usb-note');
+  if (!btn) return;
+  if (!usbMode) { btn.style.display = 'none'; note.style.display = 'none'; return; }
+  btn.style.display = '';
+
+  // Pending command: done once status/usb_mode shows the asked-for state.
+  if (usbCmdAt && usbMode.on === usbCmdWant) usbCmdAt = 0;
+  const waitSec = usbCmdAt ? Math.floor((Date.now() - usbCmdAt) / 1000) : 0;
+  if (usbCmdAt && waitSec > 150) {
+    usbCmdAt = 0;
+    note.style.display = ''; note.style.color = 'var(--amber)';
+    note.textContent = 'No change seen — the stove refuses this during a log insertion. Try again once it has finished.';
+  } else if (usbCmdAt) {
+    note.style.display = ''; note.style.color = 'var(--dim)';
+    note.textContent = usbCmdWant
+      ? `USB mode requested ${waitSec} s ago — the stove reboots and reconnects (about a minute)…`
+      : `Arming the switches (requested ${waitSec} s ago)…`;
+  } else if (note.style.color !== 'var(--amber)') {
+    note.style.display = 'none';
+  }
+
+  btn.disabled = !!usbCmdAt;
+  btn.style.opacity = usbCmdAt ? .5 : 1;
+  btn.textContent = usbMode.on ? 'Arm switches (USB off)' : 'Turn on USB mode';
+}
+
+function toggleUsbMode() {
+  if (!client || !client.connected) { alert('Connect to a stove first.'); return; }
+  if (!usbMode) return;
+  const on = !usbMode.on;
+  const msg = on
+    ? `Turn on USB mode on ${cfg.serial} for 3 hours?\n\nThe stove will REBOOT now. While USB mode is on, the forward end switches are NOT read — be careful with insertions and carriage moves.\n\nIt switches back by itself after 3 hours.`
+    : `Arm the forward end switches on ${cfg.serial} now?\n\nThe USB serial port stops working until USB mode is turned on again.`;
+  if (!confirm(msg)) return;
+  client.publish(prefix + '/cmd/usb_debug', on ? '1' : '0');
+  usbCmdAt = Date.now(); usbCmdWant = on;
+  document.getElementById('usb-note').style.color = '';
+  renderUsbButton();
 }
 
 function resetInputsCheck() {
@@ -1048,6 +1103,7 @@ function connect() {
       reloadReq = null; reloadReqRaisedAt = null; prevInsert = null; lastInsertKind = null; feedEvents = [];
       inputs = null; inputsPrevBits = ''; usbMode = null;
       heap = null; bleBoostAt = 0; bleBoostDone = '';
+      usbCmdAt = 0; document.getElementById('usb-note').style.color = '';
       renderInputs();
       renderRoomSensor();
     }
