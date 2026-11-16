@@ -4,7 +4,10 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
 <title>WoodMood Debug</title>
-<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<!-- Exact version + integrity hash: the browser refuses the file if unpkg ever serves
+     different bytes. To upgrade, change the version AND recompute the hash:
+     curl -s <url> | openssl dgst -sha384 -binary | openssl base64 -A -->
+<script src="https://unpkg.com/mqtt@5.16.1/dist/mqtt.min.js" integrity="sha384-ilRYg/zm2XqUafLvBoGVk40UfNRnvUkYMy+e/JPo4YgsFR6X9Q3jYEkqFQXquX4r" crossorigin="anonymous"></script>
 <style>
   :root{
     --bg:#0f1115; --card:#171a21; --border:#282c36; --text:#e8eaf0; --dim:#8a90a2;
@@ -101,6 +104,17 @@
   .ubadge.mainline{border-color:var(--green);color:var(--green);background:rgba(46,204,113,.1)}
   .ubadge .ctx{font-size:10px;color:var(--dim);font-weight:400}
 
+  /* fleet tab */
+  .fleet-wrap{overflow-x:auto}
+  table.fleet{width:100%;border-collapse:collapse;font-size:13px;min-width:720px}
+  table.fleet th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);font-weight:600;padding:6px 10px;white-space:nowrap}
+  table.fleet td{padding:10px;border-top:1px solid var(--border);vertical-align:top}
+  table.fleet td.nowrap{white-space:nowrap}
+  table.fleet .serial{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700}
+  table.fleet .sub{display:block;margin:2px 0 0;font-size:11px;color:var(--dim)}
+  table.fleet .ok{color:var(--green)}
+  table.fleet .warn{color:var(--amber)}
+
   /* switch & sensor check (status/inputs + status/usb_mode) */
   .inp-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
   .inp-head h2{margin:0}
@@ -165,6 +179,7 @@
   <div class="tabs">
     <button class="tab-btn active" id="tab-btn-live" onclick="switchTab('live')">Live</button>
     <button class="tab-btn" id="tab-btn-history" onclick="switchTab('history')">History</button>
+    <button class="tab-btn" id="tab-btn-fleet" onclick="switchTab('fleet')">Fleet</button>
   </div>
 
   <div id="tab-live">
@@ -176,7 +191,7 @@
       <input id="cfg-port"   placeholder="WSS port  e.g. 8084" type="number"/>
       <input id="cfg-user"   placeholder="Username"/>
       <input id="cfg-pass"   placeholder="Password" type="password"/>
-      <input id="cfg-serial" placeholder="Device serial  e.g. JJQF9D"/>
+      <input id="cfg-serial" placeholder="Device serial  e.g. ABC123"/>
       <button class="btn-connect" id="conn-btn" onclick="toggleConnect()">Connect</button>
     </div>
     <div class="status-row">
@@ -431,6 +446,26 @@
     <div class="log" id="hist-table" style="height:420px"><div class="empty">No data yet</div></div>
   </div>
 
+  </div>
+
+  <div id="tab-fleet" style="display:none">
+  <div class="card">
+    <h2>Fleet</h2>
+    <div id="fleet-locked">
+      <form class="share-row" style="margin-top:0" onsubmit="fleetUnlock(false);return false">
+        <input id="fleet-pass" type="password" placeholder="Fleet password" autocomplete="current-password"/>
+        <button class="btn-connect" type="submit">Unlock</button>
+      </form>
+      <label class="share-note" style="display:block"><input id="fleet-remember" type="checkbox" style="width:auto;margin-right:6px"/>Keep unlocked until this tab is closed</label>
+      <div class="share-note" id="fleet-msg"></div>
+      <div class="share-note">The fleet list is stored encrypted in this page and is decrypted here in your browser. Nothing is sent anywhere.</div>
+    </div>
+    <div id="fleet-open" style="display:none">
+      <div class="fleet-wrap"><table class="fleet" id="fleet-table"></table></div>
+      <div class="share-note" id="fleet-note"></div>
+      <div class="share-row"><button class="btn-share" onclick="fleetLock()">Lock</button></div>
+    </div>
+  </div>
   </div>
 
 </div>
@@ -836,9 +871,100 @@ window.addEventListener('load', () => {
 function switchTab(name) {
   document.getElementById('tab-live').style.display = name === 'live' ? '' : 'none';
   document.getElementById('tab-history').style.display = name === 'history' ? '' : 'none';
+  document.getElementById('tab-fleet').style.display = name === 'fleet' ? '' : 'none';
   document.getElementById('tab-btn-live').classList.toggle('active', name === 'live');
   document.getElementById('tab-btn-history').classList.toggle('active', name === 'history');
+  document.getElementById('tab-btn-fleet').classList.toggle('active', name === 'fleet');
+  if (name === 'fleet') { renderFleet(); if (!fleetData) fleetUnlock(true); }
   renderUnitBar();
+}
+
+// ============================================================
+// FLEET — one row per stove: last firmware build, motor, gearbox.
+// This repo is PUBLIC, so the data is NOT in this file in the clear.
+// FLEET_BLOB is fleet.json encrypted with a password (AES-256-GCM,
+// key from PBKDF2-SHA256). The tab asks for the password and
+// decrypts in the browser; nothing is sent anywhere.
+//   Edit:    fleet.json (gitignored, stays on the Mac)
+//   Rebuild: node tools/fleet-encrypt.mjs
+// Never paste stove data, a password, a WiFi name, an owner or an
+// address into this file.
+// ============================================================
+const FLEET_BLOB = /*FLEET_BLOB_START*/{"v":1,"iter":600000,"salt":"MigkPClGPpI4yXDQwANFyw==","iv":"UyKb3POSTWhkY395","ct":"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"}/*FLEET_BLOB_END*/;
+// sessionStorage, not localStorage: every GitHub Pages site of this account shares one
+// origin, so a password kept in localStorage would be readable by all of those pages.
+const FLEET_PW_LS = 'woodmood_debug_fleet_pw';
+let fleetData = null;      // { asOf, stoves } once unlocked
+let fleetBusy = false;
+
+function b64ToBytes(b) { return Uint8Array.from(atob(b), c => c.charCodeAt(0)); }
+
+async function fleetDecrypt(password) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: b64ToBytes(FLEET_BLOB.salt), iterations: FLEET_BLOB.iter, hash: 'SHA-256' }, base,
+    { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(FLEET_BLOB.iv) }, key, b64ToBytes(FLEET_BLOB.ct));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+// A wrong password makes AES-GCM's check fail, so decrypt() throws: there is
+// no separate "is it right?" comparison a reader of this page could bypass.
+async function fleetUnlock(fromSaved) {
+  if (fleetBusy) return;
+  const msg = document.getElementById('fleet-msg');
+  const input = document.getElementById('fleet-pass');
+  let pw = '';
+  if (fromSaved) { try { pw = sessionStorage.getItem(FLEET_PW_LS) || ''; } catch (e) {} }
+  else pw = input.value;
+  if (!pw) { if (!fromSaved) msg.textContent = 'Enter the fleet password.'; return; }
+  if (!FLEET_BLOB) { msg.textContent = 'No fleet data in this build of the page (run tools/fleet-encrypt.mjs).'; return; }
+  if (!(window.crypto && crypto.subtle)) { msg.textContent = 'This browser cannot decrypt here — open the page over https or localhost.'; return; }
+  fleetBusy = true; msg.textContent = 'Unlocking…';
+  try {
+    fleetData = await fleetDecrypt(pw);
+    if (document.getElementById('fleet-remember').checked || fromSaved) { try { sessionStorage.setItem(FLEET_PW_LS, pw); } catch (e) {} }
+    input.value = ''; msg.textContent = '';
+  } catch (e) {
+    fleetData = null;
+    if (fromSaved) { try { sessionStorage.removeItem(FLEET_PW_LS); } catch (e2) {} msg.textContent = 'The saved password no longer works. Enter the current one.'; }
+    else msg.textContent = 'Wrong password.';
+  }
+  fleetBusy = false;
+  renderFleet();
+  fillHistStoveSelect();
+}
+
+function fleetLock() {
+  fleetData = null;
+  try { sessionStorage.removeItem(FLEET_PW_LS); } catch (e) {}
+  document.getElementById('fleet-msg').textContent = '';
+  renderFleet();
+  fillHistStoveSelect();
+}
+
+function renderFleet() {
+  const locked = !fleetData;
+  document.getElementById('fleet-locked').style.display = locked ? '' : 'none';
+  document.getElementById('fleet-open').style.display = locked ? 'none' : '';
+  if (locked) return;
+  const tbl = document.getElementById('fleet-table');
+  const rows = fleetData.stoves.slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  tbl.innerHTML =
+    '<thead><tr><th>Stove</th><th>Last flash</th><th>Motor</th><th>Gearbox</th><th>Board</th><th>What it runs</th></tr></thead><tbody>' +
+    rows.map(r =>
+      `<tr><td class="nowrap"><span class="serial">${escapeHtml(r.serial)}</span></td>` +
+      `<td class="nowrap">${escapeHtml(r.date)}` +
+        `<span class="sub">${escapeHtml(r.commit)} · <span class="${r.flashed ? 'ok' : 'warn'}">${r.flashed ? 'flashed, seen running' : 'built, flash not recorded'}</span></span></td>` +
+      `<td class="nowrap">${escapeHtml(r.motor)}${r.driver ? `<span class="sub">${escapeHtml(r.driver)}</span>` : ''}</td>` +
+      `<td class="nowrap">${escapeHtml(r.gearbox)}</td>` +
+      `<td class="nowrap">${escapeHtml(r.board)}<span class="sub">${escapeHtml(r.expander)}</span></td>` +
+      `<td>${escapeHtml(r.note)}</td></tr>`
+    ).join('') + '</tbody>';
+  document.getElementById('fleet-note').textContent =
+    `Snapshot of ${fleetData.asOf}, taken from the newest build folder of each stove. ` +
+    'The date is when the build was made; "flash not recorded" means the build notes do not say it reached the stove. ' +
+    'To update it: edit fleet.json, then run tools/fleet-encrypt.mjs.';
 }
 
 // ============================================================
@@ -1762,10 +1888,18 @@ let histRows = [];
 // SUPABASE_RULE.md); older mainline builds also carry fw_* inside status/full.
 let histUnit = { serial: '', fw: { version: '', commit: '', build: '', raw: {} }, asOf: null, sawFull: false, hasFeedManual: false };
 
-// Fleet serials (= the UNIT_* names in HenriLib Secrets.h). Supabase `device` is the bare serial.
-// VEWGAX and TEST001 are the same bench machine before/after the rename — kept apart because
-// Supabase stores each under the serial it was running as at the time.
-const HIST_STOVES = ['JJQF9D', 'VEWGAX', 'TEST001', 'TEST002', 'AFNMU3', '87FQ8F', 'MRUNDG', 'C5KA7T'];
+// Fleet serials are NOT listed in this public file. They come from the encrypted fleet
+// block (fleet.json "historySerials") once the Fleet tab is unlocked. While it is locked the
+// selector offers the connected stove and the last stove picked on this device; any other
+// stove can still be queried by typing a full WoodMood<serial>/… topic in the topic box.
+// Supabase `device` is the bare serial; a renamed unit keeps its old rows under its old serial.
+function histStoves() {
+  const list = (fleetData && Array.isArray(fleetData.historySerials)) ? fleetData.historySerials.slice() : [];
+  let saved = '';
+  try { saved = localStorage.getItem(HIST_STOVE_LS) || ''; } catch (e) {}
+  if (/^[A-Z0-9]{3,12}$/.test(saved) && !list.includes(saved)) list.push(saved);
+  return list;
+}
 const HIST_STOVE_LS = 'woodmood_debug_hist_stove';
 
 // Every stove now logs into the same `logs` table, so History always queries ONE serial —
@@ -1793,9 +1927,11 @@ function fillHistStoveSelect() {
   const sel = document.getElementById('hist-stove');
   let saved = '';
   try { saved = localStorage.getItem(HIST_STOVE_LS) || ''; } catch (e) {}
+  const list = histStoves();
   sel.innerHTML = `<option value="">${histFollowLabel()}</option>`
-    + HIST_STOVES.map(s => `<option value="${s}">${s}</option>`).join('');
-  sel.value = HIST_STOVES.includes(saved) ? saved : '';
+    + list.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')
+    + (fleetData ? '' : '<option value="" disabled>Unlock the Fleet tab to list every stove</option>');
+  sel.value = list.includes(saved) ? saved : '';
 }
 
 function clearHistory(msg) {

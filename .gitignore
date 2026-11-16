@@ -1,2 +1,7 @@
 logger/.env
 logger/data/
+
+# Fleet tab: plain data and its password never go to this public repo.
+# Only the encrypted blob inside index.html is committed (tools/fleet-encrypt.mjs).
+fleet.json
+.fleet-password
