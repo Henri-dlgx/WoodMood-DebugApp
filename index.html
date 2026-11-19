@@ -62,6 +62,8 @@
   .v.alert{color:var(--red)}
   .v.ok{color:var(--green)}
   .v.na{color:var(--dim);font-weight:400}
+  .v.busy{color:var(--blue)}
+  .v.warn{color:#f5a623}
 
   .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media (max-width:800px){.two-col{grid-template-columns:1fr}}
@@ -506,6 +508,46 @@ const DIAG = {
   25: { text: 'Trapdoor presumed open — run a forced close to re-arm insertion', sev: 'warn' },
 };
 const DIAG_RELOAD_REQUESTED = 22, DIAG_MANUAL_NOT_RELOADED = 23;
+
+// status/full "seq" = the firmware's AutoSequenceState as an integer. The ORDER
+// here must match `enum AutoSequenceState` in AutoSequenceManager.h exactly —
+// the firmware sends the index, not the name. kind picks the colour:
+// insert = a normal insertion step, retry = the log stuck and it is trying
+// again, fault = jam handling, service = gasket service / forced close.
+// Firmware without "seq" (before Nov 19 2026) shows "—".
+const SEQ = [
+  { name: 'Idle',                                kind: 'idle'    }, //  0 AUTO_IDLE
+  { name: 'Pre-insert wait (fans stopping)',     kind: 'insert'  }, //  1 AUTO_PRE_INSERT_WAIT
+  { name: 'Retracting piston',                   kind: 'insert'  }, //  2 AUTO_RETRACT_PISTON
+  { name: 'Carriage forward',                    kind: 'insert'  }, //  3 AUTO_MOTOR_FORWARD_1
+  { name: 'Pushing log (piston extending)',      kind: 'insert'  }, //  4 AUTO_EXTEND_PISTON
+  { name: 'Carriage adjust forward',             kind: 'insert'  }, //  5 AUTO_MOTOR_FORWARD_2
+  { name: 'Returning home (last log)',           kind: 'insert'  }, //  6 AUTO_RETURN_HOME
+  { name: 'Post-insert wait',                    kind: 'insert'  }, //  7 AUTO_POST_INSERT_WAIT
+  { name: 'Retry 1: retracting',                 kind: 'retry'   }, //  8 AUTO_RETRY_1_RETRACT
+  { name: 'Retry 1: carriage back',              kind: 'retry'   }, //  9 AUTO_RETRY_1_MOTOR_BACK
+  { name: 'Retry 1: pushing again',              kind: 'retry'   }, // 10 AUTO_RETRY_1_EXTEND
+  { name: 'Retry 2: retracting',                 kind: 'retry'   }, // 11 AUTO_RETRY_2_RETRACT
+  { name: 'Retry 2: carriage back',              kind: 'retry'   }, // 12 AUTO_RETRY_2_MOTOR_BACK
+  { name: 'Retry 2: last push',                  kind: 'retry'   }, // 13 AUTO_RETRY_2_EXTEND
+  { name: 'Fault: safety retraction',            kind: 'fault'   }, // 14 AUTO_FAULT_RETRACT
+  { name: 'Fault',                               kind: 'fault'   }, // 15 AUTO_FAULT
+  { name: 'Insertion complete',                  kind: 'insert'  }, // 16 AUTO_COMPLETE
+  { name: 'Door recovery: closing trapdoor',     kind: 'fault'   }, // 17 AUTO_DOOR_RECOVERY_EXTEND
+  { name: 'Fault resolve: closing trapdoor',     kind: 'fault'   }, // 18 AUTO_FAULT_RESOLVE_EXTEND
+  { name: 'Gasket service: homing',              kind: 'service' }, // 19 AUTO_JOINT_HOMING
+  { name: 'Gasket service: opening trapdoor',    kind: 'service' }, // 20 AUTO_JOINT_OPENING
+  { name: 'Gasket service: waiting for "done"',  kind: 'service' }, // 21 AUTO_JOINT_WAIT
+  { name: 'Gasket service: closing trapdoor',    kind: 'service' }, // 22 AUTO_JOINT_CLOSING
+  { name: 'Gasket service: retry back-off',      kind: 'service' }, // 23 AUTO_JOINT_CLOSE_BACKOFF
+  { name: 'Force close: closing trapdoor',       kind: 'service' }, // 24 AUTO_FCLOSE_EXTEND
+  { name: 'Force close: backing off blockage',   kind: 'service' }, // 25 AUTO_FCLOSE_BACKOFF
+  { name: 'Force close: blocked, waiting',       kind: 'service' }, // 26 AUTO_FCLOSE_BLOCKED
+  { name: 'Force close: switching side',         kind: 'service' }, // 27 AUTO_FCLOSE_HANDOVER
+];
+const SEQ_CLS = { idle: 'na', insert: 'busy', retry: 'warn', fault: 'alert', service: 'busy' };
+function seqName(v) { return typeof v !== 'number' ? '—' : (SEQ[v] ? SEQ[v].name : 'Unknown step') + ' (' + v + ')'; }
+function seqCls(v)  { return typeof v !== 'number' ? 'na' : SEQ[v] ? SEQ_CLS[SEQ[v].kind] : 'warn'; }
 
 // ============================================================
 // STATE
@@ -1493,6 +1535,7 @@ function renderDoors() {
     boolKv('Main door open', full.door_main, true) +
     boolKv('Loading door open', full.door_load, true) +
     boolKv('Auto-insertion enabled', full.auto_insert) +
+    kv('Sequence step', seqName(full.seq), seqCls(full.seq)) +
     kv('Log level — Left', full.log_l ?? '—') +
     kv('Log level — Right', full.log_r ?? '—') +
     boolKv('Heartbeat healthy', full.hb_healthy) +
@@ -1781,6 +1824,7 @@ function renderAllFields() {
   g.innerHTML = keys.map(k => {
     const v = full[k];
     if (typeof v === 'boolean') return boolKv(k, v);
+    if (k === 'seq') return kv(k, seqName(v), seqCls(v));
     return kv(k, v === '' ? '—' : v);
   }).join('');
 }
@@ -2964,6 +3008,8 @@ function tlWireOnce() {
       meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">code</span><span style="font-weight:600;color:${tlCodeCol(ia.code).tx}">${ia.code}</span></div>`;
       if (!ia.on && ia.text) meta += `<div style="color:var(--dim);font-size:10px;margin-top:1px">${escapeHtml(ia.text)}</div>`;
     }
+    if (typeof near.p.seq === 'number' && near.p.seq !== 0)
+      meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">step</span><span style="font-weight:600">${escapeHtml(seqName(near.p.seq))}</span></div>`;
     const fd = tlSegAt(tlData.fdSeg, near.t);
     if (fd) meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">feed</span><span style="font-weight:600;color:${TL_FDCOL[fd.v].tx}">${TL_FDCOL[fd.v].name}</span></div>`;
     if (tlBuckets) {
