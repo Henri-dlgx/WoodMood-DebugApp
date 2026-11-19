@@ -350,7 +350,7 @@
 
   <div class="card">
     <h2>Timeline</h2>
-    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp with its setpoint as a red line on the same scale, fan speeds and chip temp overlaid — each otherwise scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, automatic vs manual feeding (with hand-fed logs marked), every restart (with its reset reason and any firmware flash, when status/crash and status/firmware are in the fetch), and a samples lane showing where data actually arrived — so a stretch where the stove went quiet without rebooting stands out — all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
+    <div class="share-note" style="margin-top:0;margin-bottom:10px">Stove temp with its setpoint as a red line on the same scale, fan speeds and chip temp overlaid — each otherwise scaled to its own range so they're comparable — with insertion markers, per-side log tracks, the active side, the setpoint (scheduled vs constant), whether auto-insertion was actually able to run, the diagnostic code behind it, automatic vs manual feeding (with hand-fed logs marked), every restart (with its reset reason and any firmware flash, when status/crash and status/firmware are in the fetch), and a samples lane showing where data actually arrived — so a stretch where the stove went quiet without rebooting stands out — and a live lane under it showing when an app had the stove in live mode (1 s updates instead of every 30 s), all on one shared time axis. Drag the handles to zoom; hover for exact values.</div>
     <div id="tl-empty" class="empty">Fetch data first — the timeline is built from status/full history.</div>
     <div id="tl-body" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
@@ -385,6 +385,8 @@
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:0;border-top:2px solid #ff5c6a"></span>crash / watchdog / brownout restart</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(138,144,162,.35)"></span>offline (no data before a restart)</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="letter-spacing:2px;color:#4a9eff;font-size:14px;line-height:0">•••</span>samples (brighter = more rows)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:#2b5d97"></span>live mode — 1 s updates an app asked for (status/live)</span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;border:1px solid rgba(74,158,255,.6);background:repeating-linear-gradient(45deg,rgba(74,158,255,.6) 0 2px,rgba(74,158,255,.1) 2px 5px)"></span>1 s updates with no live-mode record (read from the samples)</span>
         <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:rgba(245,166,35,.3);border-bottom:2px dashed #f5a623"></span>no data, no restart (link lost or stalled — hover)</span>
       </div>
       <div style="margin-top:12px">
@@ -2460,7 +2462,19 @@ const TL_INS = '#e5484d', TL_TRANS = '#bb86fc', TL_AXIS = '#8a90a2', TL_GRID = '
 const TLX0 = 50, TLW = 900, TLY0 = 12, TLH = 170, TLY1 = 182,
       TL_LLY = 200, TL_LRY = 228, TL_GY = 214, TL_SY = 240, TL_SH = 24, TL_SPY = 272, TL_SPH = 30,
       TL_IAY = 310, TL_IAH = 24, TL_CDY = 340, TL_CDH = 22, TL_FDY = 368, TL_FDH = 22,
-      TL_SMY = 398, TL_SMH = 14, TL_VBH = 420, TL_VB = TL_SY + TL_SH;
+      TL_SMY = 398, TL_SMH = 14, TL_LVY = 416, TL_LVH = 14, TL_VBH = 438, TL_VB = TL_SY + TL_SH;
+// Live lane (under samples): the stove sends status/full every 30 s unless an
+// app asked for live mode (cmd/live → 1 s). Solid = live mode per status/live,
+// which the firmware publishes on every cmd/live (with left_s), on expiry and
+// on connect, so its edges are exact. Hatched = 1 s updates seen in the samples
+// with no live-mode record behind them: status/live not in the Supabase rule
+// yet, older firmware that is always 1 s, or a unit whose idle rate is 1 s.
+const TL_LVCOL = {
+  live: { fill: '#2b5d97',               tx: '#e3efff', name: 'live' },
+  fast: { fill: 'url(#tllvh)',           tx: '#9cc7ff', name: '1 s'  },
+  idle: { fill: 'rgba(138,144,162,0.10)' },
+};
+const TL_FAST_DT = 3000, TL_FAST_MIN_MS = 8000;   // inferred 1 s run: every step ≤ 3 s, lasting ≥ 8 s
 // Samples lane: the window is cut into this many slices and each slice that got
 // at least one status/full row gets a dot, brighter the more rows it got. Gaps
 // are stretches with no row at all for much longer than the stove's recent
@@ -2631,20 +2645,63 @@ function tlBuild() {
     prevUp = up; prevT = fr.t;
   });
 
+  // Live mode from status/live. Each "on" row (re)sets the expiry to t + left_s
+  // — a renewal replaces it, it doesn't add — and an "off" row ends it. Live
+  // mode is RAM only, so a restart ends it too.
+  const liveRows = [];
+  histRows.forEach(r => {
+    if (!/\/status\/live$/.test(r.topic)) return;
+    const p = r.payload;
+    if (!p || typeof p !== 'object' || typeof p.on !== 'boolean') return;
+    liveRows.push({ t: new Date(r.received_at).getTime(), on: p.on, left: typeof p.left_s === 'number' ? p.left_s : 0 });
+  });
+  liveRows.sort((x, y) => x.t - y.t);
+  const liveSeg = [];
+  let cur = null;
+  liveRows.forEach(o => {
+    if (o.on && o.left > 0) {
+      const end = o.t + o.left * 1000;
+      if (cur && o.t <= cur.end) { cur.end = end; cur.renewals++; }
+      else { cur = { start: o.t, end, renewals: 0 }; liveSeg.push(cur); }
+    } else {
+      if (cur && o.t < cur.end) cur.end = o.t;
+      cur = null;
+    }
+  });
+  liveSeg.forEach(g => restarts.forEach(r => { if (r.t > g.start && r.t < g.end) g.end = r.t; }));
+
+  // 1 s runs in the samples themselves: consecutive rows ≤ 3 s apart for ≥ 8 s.
+  // The duration floor keeps a late burst (rows flushed together after a stall)
+  // from passing for live mode.
+  const fastSeg = [];
+  let run = null;
+  for (let i = 1; i < fullRows.length; i++) {
+    const t0 = fullRows[i - 1].t, t1 = fullRows[i].t;
+    if (t1 - t0 <= TL_FAST_DT) { if (run) run.end = t1; else run = { start: t0, end: t1 }; continue; }
+    if (run && run.end - run.start >= TL_FAST_MIN_MS) fastSeg.push(run);
+    run = null;
+  }
+  if (run && run.end - run.start >= TL_FAST_MIN_MS) fastSeg.push(run);
+
   // Gaps that did NOT end in a restart (those are the offline stretch above).
-  // The threshold follows the recent publish rate, so a 20 s hole in 1 Hz live
-  // mode counts but the normal 30 s cadence outside it doesn't. Uptime only
+  // Anything over 40 s counts (the idle cadence is 30 s), or 4x the recent
+  // rate if that is slower. A shorter hole (over 15 s) counts only where the
+  // stove was demonstrably on 1 s on BOTH sides of it — live mode still running
+  // at the next row, or 1 s runs ending and restarting around it — so the
+  // normal drop from 1 s back to 30 s when an app closes is not a gap. Uptime only
   // proves there was no reboot — a blocked loop and a dead link look the same
   // there. What tells them apart: status/firmware inside the gap means MQTT
   // reconnected (the link dropped), and several rows landing within a few ms
   // right after it means they were queued in transit and flushed late. Those
   // late rows carry old uptimes, so uptime is read from the first row after them.
   const gaps = [], ivs = [];
+  const fastEnds = new Set(fastSeg.map(g => g.end)), fastStarts = new Set(fastSeg.map(g => g.start));
   for (let i = 1; i < fullRows.length; i++) {
     const r0 = fullRows[i - 1], r1 = fullRows[i], dt = r1.t - r0.t;
     const recent = ivs.slice(-20).sort((x, y) => x - y), med = recent.length ? recent[recent.length >> 1] : 1000;
     ivs.push(dt);
-    if (dt <= Math.max(15000, med * 4)) continue;
+    const fastBoth = liveSeg.some(g => r1.t > g.start && r1.t < g.end) || (fastEnds.has(r0.t) && fastStarts.has(r1.t));
+    if (dt <= (fastBoth ? 15000 : Math.max(40000, med * 4))) continue;
     const u0 = r0.p.uptime, u1 = r1.p.uptime, hasUp = typeof u0 === 'number' && typeof u1 === 'number';
     if (hasUp && u1 < u0) continue;
     let j = i;
@@ -2655,7 +2712,7 @@ function tlBuild() {
                 reconnect: bootRows.fw.some(o => o.t > r0.t && o.t <= r1.t + 5000) });
   }
 
-  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, fdSeg, restarts, gaps, spMin: spMin - pad, spMax: spMax + pad, fullRows };
+  return { tMin, tMax, series, events, sideSeg, spSeg, iaSeg, fdSeg, restarts, gaps, liveSeg, fastSeg, hasLive: liveRows.length > 0, spMin: spMin - pad, spMax: spMax + pad, fullRows };
 }
 
 function tlGapText(g) {
@@ -2732,12 +2789,13 @@ function tlDraw() {
   const yF = (s, v) => { let f; if (tlNorm) { const r = tlData.series[s.key]; f = (v - r.min) / ((r.max - r.min) || 1); } else { f = v / gmax; } return TLY1 - Math.max(-0.04, Math.min(1.04, f)) * TLH; };
   const p = [];
   p.push(`<svg viewBox="0 0 960 ${TL_VBH}" width="100%" style="display:block">`);
-  p.push(`<defs><clipPath id="tlpc"><rect x="${TLX0}" y="${TLY0}" width="${TLW}" height="${TLH}"/></clipPath></defs>`);
+  p.push(`<defs><clipPath id="tlpc"><rect x="${TLX0}" y="${TLY0}" width="${TLW}" height="${TLH}"/></clipPath>`
+    + `<pattern id="tllvh" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="rgba(74,158,255,0.10)"/><line x1="0" y1="0" x2="0" y2="6" stroke="rgba(74,158,255,0.55)" stroke-width="2"/></pattern></defs>`);
   [0, .25, .5, .75, 1].forEach(f => { const y = TLY1 - f * TLH; p.push(`<line x1="${TLX0}" y1="${y}" x2="${TLX0 + TLW}" y2="${y}" stroke="${TL_GRID}"/>`); p.push(`<text x="${TLX0 - 7}" y="${y + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${tlNorm ? Math.round(f * 100) + '%' : Math.round(f * gmax)}</text>`); });
   const ticks = 6;
   for (let i = 0; i <= ticks; i++) { const t = a + span * i / ticks, x = TLX0 + TLW * i / ticks; p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TLY1}" stroke="${TL_GRID}"/>`); p.push(`<text x="${x}" y="${TLY1 + 12}" text-anchor="${i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}" font-size="10" fill="${TL_AXIS}">${tlClock(t)}</text>`); }
   tlData.restarts.forEach(r => { if (r.offFrom === null) return; const s0 = Math.max(r.offFrom, a), e0 = Math.min(r.t, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0); p.push(`<rect x="${xa}" y="${TLY0}" width="${xb - xa}" height="${TL_FDY + TL_FDH - TLY0}" fill="${TL_OFF}"/>`); if (xb - xa > 44) p.push(`<text x="${(xa + xb) / 2}" y="${TLY1 - 6}" text-anchor="middle" font-size="10" fill="${TL_AXIS}">offline</text>`); });
-  tlData.gaps.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0); p.push(`<rect x="${xa}" y="${TLY0}" width="${Math.max(1, xb - xa)}" height="${TL_SMY + TL_SMH - TLY0}" fill="${TL_GAP_FILL}"/>`); if (xb - xa > 60) p.push(`<text x="${(xa + xb) / 2}" y="${TLY1 - 6}" text-anchor="middle" font-size="10" fill="${TL_GAP}">no data ${tlDur((g.end - g.start) / 1000)}</text>`); });
+  tlData.gaps.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0); p.push(`<rect x="${xa}" y="${TLY0}" width="${Math.max(1, xb - xa)}" height="${TL_LVY + TL_LVH - TLY0}" fill="${TL_GAP_FILL}"/>`); if (xb - xa > 60) p.push(`<text x="${(xa + xb) / 2}" y="${TLY1 - 6}" text-anchor="middle" font-size="10" fill="${TL_GAP}">no data ${tlDur((g.end - g.start) / 1000)}</text>`); });
   tlData.sideSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), col = TL_SIDECOL[g.v]; p.push(`<rect x="${xa}" y="${TL_SY}" width="${xb - xa}" height="${TL_SH}" fill="${col.fill}"/>`); if (xb - xa > 46) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SY + TL_SH / 2 + 4}" text-anchor="middle" font-size="11" fill="${col.tx}">${col.name}</text>`); });
   tlData.spSeg.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; const xa = xF(s0), xb = xF(e0), w = xb - xa, col = TL_SPCOL[g.mode] || TL_SPCOL.fixed; p.push(`<rect x="${xa}" y="${TL_SPY}" width="${w}" height="${TL_SPH}" fill="${col.band}"/>`); const frac = Math.max(0, Math.min(1, (g.sp - tlData.spMin) / ((tlData.spMax - tlData.spMin) || 1))), lh = frac * TL_SPH; p.push(`<rect x="${xa}" y="${TL_SPY + TL_SPH - lh}" width="${w}" height="${lh}" fill="${col.lvl}"/>`); if (w > 26) { p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 14}" text-anchor="middle" font-size="12" fill="${col.tx}">${Math.round(g.sp)}°</text>`); if (w > 66) p.push(`<text x="${(xa + xb) / 2}" y="${TL_SPY + 26}" text-anchor="middle" font-size="9" fill="${col.tx}">${col.name}</text>`); } });
   tlData.spSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TL_SPY - 3}" x2="${x}" y2="${TL_SPY + TL_SPH + 3}" stroke="${TL_AXIS}" stroke-dasharray="1 3"/>`); });
@@ -2753,9 +2811,22 @@ function tlDraw() {
   const cMax = Math.max(1, ...counts), smY = TL_SMY + TL_SMH / 2;
   counts.forEach((c, i) => { if (!c) return; p.push(`<circle cx="${TLX0 + (i + 0.5) * TLW / TL_SM_BUCKETS}" cy="${smY}" r="1.4" fill="${TL_SMDOT}" fill-opacity="${(0.3 + 0.7 * c / cMax).toFixed(2)}"/>`); });
   tlData.gaps.forEach(g => { const s0 = Math.max(g.start, a), e0 = Math.min(g.end, b); if (e0 <= s0) return; p.push(`<line x1="${xF(s0)}" y1="${smY}" x2="${Math.max(xF(s0) + 1, xF(e0))}" y2="${smY}" stroke="${TL_GAP}" stroke-width="2" stroke-dasharray="3 2"/>`); });
+  // Live lane — faint base over the data range (= 30 s), hatched 1 s runs seen
+  // in the samples, then the exact live-mode stretches on top.
+  const lvBar = (s, e, fill) => { const s0 = Math.max(s, a), e0 = Math.min(e, b); if (e0 <= s0) return null; const xa = xF(s0), xb = xF(e0); p.push(`<rect x="${xa}" y="${TL_LVY}" width="${Math.max(1, xb - xa)}" height="${TL_LVH}" rx="2" fill="${fill}"/>`); return { xa, xb }; };
+  const lvTxt = (r, col) => { if (r && r.xb - r.xa > 40) p.push(`<text x="${(r.xa + r.xb) / 2}" y="${TL_LVY + TL_LVH / 2 + 3.5}" text-anchor="middle" font-size="10" font-weight="600" fill="${col.tx}">${col.name}</text>`); };
+  lvBar(tlData.tMin, tlData.tMax, TL_LVCOL.idle.fill);
+  // Hatch only the 1 s stretches live mode doesn't already explain.
+  tlData.fastSeg.forEach(g => {
+    let parts = [[g.start, g.end]];
+    tlData.liveSeg.forEach(l => { parts = parts.flatMap(([s, e]) => l.end <= s || l.start >= e ? [[s, e]] : [[s, l.start], [l.end, e]].filter(([x, y]) => y - x > 0)); });
+    parts.forEach(([s, e]) => lvTxt(lvBar(s, e, TL_LVCOL.fast.fill), TL_LVCOL.fast));
+  });
+  let liveMs = 0;
+  tlData.liveSeg.forEach(g => { liveMs += Math.max(0, Math.min(g.end, b) - Math.max(g.start, a)); lvTxt(lvBar(g.start, g.end, TL_LVCOL.live.fill), TL_LVCOL.live); });
   const nGaps = tlData.gaps.filter(g => g.end >= a && g.start <= b).length;
-  document.getElementById('tl-winlbl').textContent = `${tlClock(a)} → ${tlClock(b)} · ${nWin.toLocaleString()} samples${nGaps ? ` · ${nGaps} gap${nGaps > 1 ? 's' : ''}` : ''}`;
-  [['log_l', TL_LLY], ['log_r', TL_LRY], ['side', TL_SY + TL_SH / 2], ['setpoint', TL_SPY + TL_SPH / 2], ['insertion', TL_IAY + TL_IAH / 2], ['code', TL_CDY + TL_CDH / 2], ['feed', TL_FDY + TL_FDH / 2], ['samples', smY]].forEach(l => p.push(`<text x="${TLX0 - 7}" y="${l[1] + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${l[0]}</text>`));
+  document.getElementById('tl-winlbl').textContent = `${tlClock(a)} → ${tlClock(b)} · ${nWin.toLocaleString()} samples${nGaps ? ` · ${nGaps} gap${nGaps > 1 ? 's' : ''}` : ''}${liveMs ? ` · live ${tlDur(liveMs / 1000)}` : ''}`;
+  [['log_l', TL_LLY], ['log_r', TL_LRY], ['side', TL_SY + TL_SH / 2], ['setpoint', TL_SPY + TL_SPH / 2], ['insertion', TL_IAY + TL_IAH / 2], ['code', TL_CDY + TL_CDH / 2], ['feed', TL_FDY + TL_FDH / 2], ['samples', smY], ['live', TL_LVY + TL_LVH / 2]].forEach(l => p.push(`<text x="${TLX0 - 7}" y="${l[1] + 3}" text-anchor="end" font-size="10" fill="${TL_AXIS}">${l[0]}</text>`));
   TL_SERIES.forEach(s => { if (!tlEnabled[s.key]) return; const ser = tlData.series[s.key]; if (!ser || ser.pts.length < 2) return; const pts = ser.pts.map(o => xF(o.t) + ',' + yF(s, o.v)).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#tlpc)"/>`); });
   tlData.sideSeg.forEach((g, i) => { if (i === 0 || !inW(g.start)) return; const x = xF(g.start); p.push(`<line x1="${x}" y1="${TLY0}" x2="${x}" y2="${TL_VB}" stroke="${TL_TRANS}" stroke-width="1.5" stroke-dasharray="2 3"/>`); });
   tlData.events.forEach(ev => {
@@ -2899,6 +2970,12 @@ function tlWireOnce() {
       const bi = Math.max(0, Math.min(TL_SM_BUCKETS - 1, Math.floor((t - tlBuckets.a) / tlBuckets.w)));
       meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">samples</span><span style="font-weight:600">${tlBuckets.counts[bi]} in ${tlDur(tlBuckets.w / 1000)}</span></div>`;
     }
+    const lv = tlData.liveSeg.find(g => near.t >= g.start && near.t <= g.end);
+    const fs = !lv && tlData.fastSeg.find(g => near.t >= g.start && near.t <= g.end);
+    const lvTxt = lv ? `on ${tlClock(lv.start)}→${tlClock(lv.end)} (${tlDur((lv.end - lv.start) / 1000)})`
+                : fs ? (tlData.hasLive ? '1 s, not live mode' : '1 s (inferred)')
+                : tlData.hasLive ? 'off · 30 s' : '30 s';
+    meta += `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:var(--dim)">live</span><span style="font-weight:600;color:${lv ? TL_LVCOL.live.tx : fs ? TL_LVCOL.fast.tx : 'var(--text)'}">${lvTxt}</span></div>`;
     const evN = tlData.events.filter(ev => Math.abs(ev.t - near.t) <= 20000)[0];
     let note = !evN ? '' : evN.hand
       ? `<div style="margin-top:4px;color:${TL_HAND}">log added by hand · stove counted it</div>`

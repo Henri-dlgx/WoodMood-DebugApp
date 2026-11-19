@@ -37,7 +37,7 @@ SELECT
   substr(nth(1, tokens(topic, '/')), 9) as device
 FROM
   "+/status/full", "+/status/diag", "+/status/stats", "+/status/crash", "+/status/firmware",
-  "+/status/inputs", "+/status/usb_mode"
+  "+/status/inputs", "+/status/usb_mode", "+/status/live"
 ```
 
 `+` matches any single topic level, so `+/status/full` matches
@@ -96,6 +96,17 @@ topics. Both are retained and published on change (plus once per connect), so
 they add a few rows per check, not a 1 Hz stream. Without them in the `FROM`
 the card says "No status/inputs rows in this range". Needs firmware with the
 switch check (WM-code-demo main ≥ b0bcaf5; `usb_mode` ≥ 2426531).
+
+#### About `status/live`
+
+The History timeline's **live** lane draws live mode (1 s `status/full` instead of
+every 30 s, asked for by an app with `cmd/live`) from this topic. The stove
+publishes it on every `cmd/live` (with `left_s`), when live mode runs out, and once
+per connect — the customer app renews every 60 s while it is on screen, so about
+one row a minute while someone is watching and nothing otherwise. Without it in the
+`FROM` the lane still shows 1 s stretches, hatched, read from the gaps between
+samples — but it cannot say whether that was live mode or a unit that always
+sends every second. Needs firmware with live mode (WM-code-demo main ≥ c5731f2).
 
 #### About `status/crash` specifically
 
